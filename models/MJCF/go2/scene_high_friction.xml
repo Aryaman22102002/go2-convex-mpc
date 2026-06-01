@@ -6,7 +6,7 @@
   <visual>
     <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
     <rgba haze="0.15 0.25 0.35 1"/>
-    <global azimuth="-130" elevation="-20" offwidth="1280" offheight="720"/>
+    <global azimuth="-130" elevation="-20"/>
   </visual>
 
   <asset>
@@ -18,7 +18,7 @@
 
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
-    <geom name="floor" size="0 0 0.05" type="plane" friction="0.3 0.005 0.0001" material="groundplane" />
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
     <geom pos="1.2 0 0.04" type="box"  size="0.1 2 0.04" quat="1.0 0 0 0"/>
     <geom pos="1.6 0 0.04" type="box"  size="0.1 2 0.04" quat="1.0 0 0 0"/>
@@ -30,5 +30,4 @@
     <geom pos="3.2 0 0.02" type="box"  size="0.25 2 0.75" quat="1.0 0 0 0"/>
     <geom pos="3.4 0 0.02" type="box"  size="0.26 2 0.9" quat="1.0 0 0 0"/>
   </worldbody>
-  
 </mujoco>
