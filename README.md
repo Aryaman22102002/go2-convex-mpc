@@ -293,10 +293,4 @@ comparison_all_gaits_mu*.mp4             # Side-by-side comparison video
 - [imageio](https://imageio.readthedocs.io/) -- Video export
 - [Pillow](https://pillow.readthedocs.io/) -- Text overlay for comparison videos
 
----
-
-## References
-
-1. Di Carlo et al., "Dynamic Locomotion in the MIT Cheetah 3 Through Convex Model-Predictive Control," IROS 2018.
-2. Wensing et al., "Proprioceptive Actuator Design in the MIT Cheetah," IEEE T-RO 2017.
-3. Sentis and Khatib, "Synthesis of Whole-Body Behaviors Through Hierarchical Control of Behavioral Primitives," IJHR 2005.
+--
