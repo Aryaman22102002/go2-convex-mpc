@@ -8,11 +8,11 @@ This fork extends the base controller with a **Whole-Body Control (WBC) QP** tha
 
 ## Demo Videos
 
-**Normal friction ($\mu = 0.8$) — all 4 gaits, Baseline vs WBC side by side:**
+**Normal friction ($\mu = 0.8$) - all 4 gaits, Baseline vs WBC side by side:**
 
 https://github.com/user-attachments/assets/comparison_all_gaits_mu08.mp4
 
-**Low friction ($\mu = 0.3$) — all 4 gaits, Baseline vs WBC side by side:**
+**Low friction ($\mu = 0.3$) - all 4 gaits, Baseline vs WBC side by side:**
 
 https://github.com/user-attachments/assets/comparison_all_gaits_mu03.mp4
 
