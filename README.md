@@ -10,13 +10,14 @@ This fork extends the base controller with a **Whole-Body Control (WBC) QP** tha
 
 **Normal friction ($\mu = 0.8$) - all 4 gaits, Baseline vs WBC side by side:**
 
-https://github.com/user-attachments/assets/comparison_all_gaits_mu08.mp4
+https://github.com/user-attachments/assets/ea4cf90a-66cb-4dea-90eb-01546c9276ff
 
 **Low friction ($\mu = 0.3$) - all 4 gaits, Baseline vs WBC side by side:**
 
-https://github.com/user-attachments/assets/comparison_all_gaits_mu03.mp4
+https://github.com/user-attachments/assets/a204347a-ee10-4d7e-8f14-b75c6843dd52
 
-> On the left panel the baseline controller ($\tau = J^T f$) slips and falls during forward trotting and rotation at $\mu = 0.3$. The WBC on the right maintains stable locomotion by enforcing friction cone constraints at the joint level.
+
+On the left panel the baseline controller ($\tau = J^T f$) slips and falls during forward trotting and rotation at $\mu = 0.3$. The WBC on the right maintains stable locomotion by enforcing friction cone constraints at the joint level.
 
 ---
 
