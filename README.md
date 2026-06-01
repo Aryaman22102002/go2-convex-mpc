@@ -137,7 +137,6 @@ go2-convex-mpc/
 │   ├── ex03_trot_sideway.py    # Original
 │   ├── ex04_trot_rotation.py   # Original
 │   ├── ex05_multi_gait_benchmark.py  # Multi-gait baseline vs WBC benchmark [NEW]
-│   └── make_comparison_video.py      # Side-by-side comparison video generator [NEW]
 └── models/
     └── MJCF/go2/
         ├── go2.xml             # Robot model
@@ -284,13 +283,4 @@ baseline_<gait>.mp4                      # Baseline simulation video per gait
 wbc_<gait>.mp4                           # WBC simulation video per gait
 comparison_all_gaits_mu*.mp4             # Side-by-side comparison video
 ```
-
----
-
-## Dependencies Added
-
-- [OSQP](https://osqp.org/) -- QP solver for the WBC
-- [imageio](https://imageio.readthedocs.io/) -- Video export
-- [Pillow](https://pillow.readthedocs.io/) -- Text overlay for comparison videos
-
 --
