@@ -123,7 +123,6 @@ go2-convex-mpc/
 │   ├── ex03_trot_sideway.py    # Original
 │   ├── ex04_trot_rotation.py   # Original
 │   ├── ex05_multi_gait_benchmark.py  # Multi-gait baseline vs WBC benchmark [NEW]
-│   └── make_comparison_video.py      # Side-by-side comparison video generator [NEW]
 └── models/
     └── MJCF/go2/
         ├── go2.xml             # Robot model
@@ -136,7 +135,6 @@ go2-convex-mpc/
 - `src/convex_mpc/leg_controller.py` -- Added `compute_all_torques` with WBC integration
 - `examples/ex02_trot_forward.py` -- Added baseline vs WBC comparison and violation logging
 - `examples/ex05_multi_gait_benchmark.py` -- Full multi-gait benchmark with videos and plots
-- `examples/make_comparison_video.py` -- Side-by-side comparison video generator
 
 ---
 
@@ -265,12 +263,6 @@ python3 examples/ex05_multi_gait_benchmark.py
 
 Runs all 4 gaits with both controllers, produces summary bar chart, per-gait cumulative violation plots, WBC timing plot, and videos. Results saved to `results_mu08/` or `results_mu03/` depending on `sim_params.py`.
 
-### Generate Side-by-Side Comparison Videos
-
-```bash
-python3 examples/make_comparison_video.py
-```
-
 ### Output Files
 
 ```
@@ -281,21 +273,6 @@ results_*/
 ├── wbc_timing.png                        # WBC solve time across all gaits
 ├── baseline_<gait>.mp4                   # Baseline simulation video per gait
 ├── wbc_<gait>.mp4                        # WBC simulation video per gait
-└── comparison_all_gaits_mu*.mp4          # Side-by-side comparison video
 ```
 
 ---
-
-## Dependencies Added
-
-- [OSQP](https://osqp.org/) -- QP solver for the WBC
-- [imageio](https://imageio.readthedocs.io/) -- Video export
-- [Pillow](https://pillow.readthedocs.io/) -- Text overlay for comparison videos
-
----
-
-## References
-
-1. Di Carlo et al., "Dynamic Locomotion in the MIT Cheetah 3 Through Convex Model-Predictive Control," IROS 2018.
-2. Wensing et al., "Proprioceptive Actuator Design in the MIT Cheetah," IEEE T-RO 2017.
-3. Sentis and Khatib, "Synthesis of Whole-Body Behaviors Through Hierarchical Control of Behavioral Primitives," IJHR 2005.
