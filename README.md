@@ -6,21 +6,6 @@ This fork extends the base controller with a **Whole-Body Control (WBC) QP** tha
 
 ---
 
-## Demo Videos
-
-**Normal friction ($\mu = 0.8$) - all 4 gaits, Baseline vs WBC side by side:**
-
-https://github.com/user-attachments/assets/ea4cf90a-66cb-4dea-90eb-01546c9276ff
-
-**Low friction ($\mu = 0.3$) - all 4 gaits, Baseline vs WBC side by side:**
-
-https://github.com/user-attachments/assets/a204347a-ee10-4d7e-8f14-b75c6843dd52
-
-
-On the left panel the baseline controller ($\tau = J^T f$) slips and falls during forward trotting and rotation at $\mu = 0.3$. The WBC on the right maintains stable locomotion by enforcing friction cone constraints at the joint level.
-
----
-
 ## Table of Contents
 
 1. [Motivation](#motivation)
@@ -138,6 +123,7 @@ go2-convex-mpc/
 │   ├── ex03_trot_sideway.py    # Original
 │   ├── ex04_trot_rotation.py   # Original
 │   ├── ex05_multi_gait_benchmark.py  # Multi-gait baseline vs WBC benchmark [NEW]
+│   └── make_comparison_video.py      # Side-by-side comparison video generator [NEW]
 └── models/
     └── MJCF/go2/
         ├── go2.xml             # Robot model
@@ -225,6 +211,22 @@ Mean solve time across all gaits is **1.5 ms**, well within the 5.0 ms budget at
 
 ---
 
+### Demo Videos
+
+All 4 gaits with Baseline vs WBC side by side. Left panel: baseline ($\tau = J^T f$). Right panel: WBC.
+
+**Normal friction ($\mu = 0.8$):**
+
+https://github.com/user-attachments/assets/ea4cf90a-66cb-4dea-90eb-01546c9276ff
+
+**Low friction ($\mu = 0.3$):**
+
+https://github.com/user-attachments/assets/a204347a-ee10-4d7e-8f14-b75c6843dd52
+
+At $\mu = 0.3$ the baseline slips and falls during forward trotting and rotation. The WBC maintains stable locomotion across all four gaits.
+
+---
+
 ## How to Run
 
 ### Installation
@@ -261,19 +263,39 @@ Runs baseline and WBC sequentially, saves comparison plots and videos to `exampl
 python3 examples/ex05_multi_gait_benchmark.py
 ```
 
-Runs all 4 gaits with both controllers, produces summary bar chart, per-gait cumulative violation plots, WBC timing plot, and videos. Results saved to `examples/results_mu08/` or `examples/results_mu03/` depending on `sim_params.py`.
+Runs all 4 gaits with both controllers, produces summary bar chart, per-gait cumulative violation plots, WBC timing plot, and videos. Results saved to `results_mu08/` or `results_mu03/` depending on `sim_params.py`.
 
+### Generate Side-by-Side Comparison Videos
+
+```bash
+python3 examples/make_comparison_video.py
+```
 
 ### Output Files
 
-After running the benchmark, `examples/results_*/` contains:
+```
+results_*/
+├── summary_all_gaits.png                 # Violation rate bar chart across all gaits
+├── cumulative_<gait>.png                 # Per-gait cumulative violation comparison
+├── torque_comparison_RL_trot_forward.png # RL leg joint torques baseline vs WBC
+├── wbc_timing.png                        # WBC solve time across all gaits
+├── baseline_<gait>.mp4                   # Baseline simulation video per gait
+├── wbc_<gait>.mp4                        # WBC simulation video per gait
+└── comparison_all_gaits_mu*.mp4          # Side-by-side comparison video
+```
 
-```
-summary_all_gaits.png                    # Violation rate bar chart across all gaits
-cumulative_<gait>.png                    # Per-gait cumulative violation comparison
-torque_comparison_RL_trot_forward.png    # RL leg joint torques baseline vs WBC
-wbc_timing.png                           # WBC solve time across all gaits
-baseline_<gait>.mp4                      # Baseline simulation video per gait
-wbc_<gait>.mp4                           # WBC simulation video per gait
-```
---
+---
+
+## Dependencies Added
+
+- [OSQP](https://osqp.org/) -- QP solver for the WBC
+- [imageio](https://imageio.readthedocs.io/) -- Video export
+- [Pillow](https://pillow.readthedocs.io/) -- Text overlay for comparison videos
+
+---
+
+## References
+
+1. Di Carlo et al., "Dynamic Locomotion in the MIT Cheetah 3 Through Convex Model-Predictive Control," IROS 2018.
+2. Wensing et al., "Proprioceptive Actuator Design in the MIT Cheetah," IEEE T-RO 2017.
+3. Sentis and Khatib, "Synthesis of Whole-Body Behaviors Through Hierarchical Control of Behavioral Primitives," IJHR 2005.
