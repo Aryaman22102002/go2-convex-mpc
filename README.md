@@ -167,7 +167,7 @@ go2-convex-mpc/
 | Trot Sideway | 6.8% (FR leg) | 0.0% |
 | Trot Rotation | 3.8% (RR leg) | 0.0% |
 
-![Friction violation rate across all gaits at normal friction](examples/results_mu08/summary_all_gaits.png)
+![Friction violation rate across all gaits at normal friction](results_mu08/summary_all_gaits.png)
 
 The baseline violates friction most severely during forward trotting because the rear legs produce large propulsive $f_x$ forces that approach the friction limit. Violations are worst at the rear legs since they bear more propulsive load than the front legs. The WBC eliminates all violations across every gait by enforcing the friction pyramid directly at the torque level every 200 Hz tick.
 
@@ -186,13 +186,13 @@ At $\mu = 0.3$ (wet floor or ice), the baseline controller becomes severely unst
 | Trot Sideway (0.35 m/s) | 82.8% (RR leg) | 0.0% |
 | Trot Rotation | 91.0% (RR leg) | 0.0% |
 
-![Friction violation rate across all gaits at low friction](examples/results_mu03/summary_all_gaits.png)
+![Friction violation rate across all gaits at low friction](results_mu03/summary_all_gaits.png)
 
 Note: sideways trotting above 0.35 m/s exceeds the physical friction limit at $\mu = 0.3$ for both controllers since the required lateral force exceeds $\mu f_z$ regardless of controller. Results are reported at 0.35 m/s where WBC maintains stability but the baseline fails.
 
 **Cumulative friction violations during forward trotting ($\mu = 0.3$):**
 
-![Cumulative friction violations during trot forward at low friction](examples/results_mu03/cumulative_trot_forward.png)
+![Cumulative friction violations during trot forward at low friction](results_mu03/cumulative_trot_forward.png)
 
 The red curve climbs to over 580 violations per leg over 5 seconds. The blue WBC curve remains exactly flat at zero throughout the entire run. The shaded pink area represents the total improvement from the WBC. The step pattern in the baseline curve corresponds to the gait cycle -- violations occur in bursts during each stance phase.
 
@@ -202,7 +202,7 @@ The red curve climbs to over 580 violations per leg over 5 seconds. The blue WBC
 
 The torque comparison shows what the WBC does differently at the actuator level, using the RL (rear-left) leg during forward trotting as it has the highest violation rate in the baseline.
 
-![RL leg joint torques: Baseline vs WBC during trot forward](examples/results_mu08/torque_comparison_RL_trot_forward.png)
+![RL leg joint torques: Baseline vs WBC during trot forward](results_mu08/torque_comparison_RL_trot_forward.png)
 
 The baseline (red) produces large torque spikes that frequently clip against the motor limits (dashed lines), particularly at the hip and thigh joints. These spikes correspond directly to friction cone violations -- the large horizontal forces required for propulsion produce excessive joint torques via the naive $J^T f$ mapping. The WBC (blue) produces smoother torque profiles that respect limits because the QP explicitly bounds torques and traces the friction constraint, finding the minimum-effort solution that satisfies both.
 
@@ -219,7 +219,7 @@ The WBC QP is solved at 200 Hz. The budget per tick is 5.0 ms.
 | Trot Sideway | 1.27 ms | 5.0 ms | 75% |
 | Trot Rotation | 1.28 ms | 5.0 ms | 74% |
 
-![WBC QP solve time per control tick across all gaits](examples/results_mu08/wbc_timing.png)
+![WBC QP solve time per control tick across all gaits](results_mu08/wbc_timing.png)
 
 Mean solve time across all gaits is **1.5 ms**, well within the 5.0 ms budget at 200 Hz. The WBC never exceeds the real-time budget across 1000 control ticks per gait. The QP is intentionally small -- 18 variables during trot ($n_z = 12 + 3 \times 2$), 12 EOM equality rows, 10 friction cone rows, and 18 box constraint rows -- enabling fast solves with OSQP warm starting. For reference, the centroidal MPC runs at 48 Hz with a mean cycle time of 3.19 ms against a 20.8 ms budget.
 
