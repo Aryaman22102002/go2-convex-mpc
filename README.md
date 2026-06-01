@@ -231,8 +231,8 @@ Mean solve time across all gaits is **1.5 ms**, well within the 5.0 ms budget at
 Follow the original repo installation instructions. Additionally install OSQP and imageio:
 
 ```bash
-pip install osqp
-pip install "imageio[ffmpeg]"
+pip3 install osqp
+pip3 install "imageio[ffmpeg]"
 ```
 
 ### Switching Friction
@@ -249,7 +249,7 @@ Running any example automatically patches the MuJoCo XML files and adjusts WBC c
 ### Run Baseline vs WBC Comparison (Single Gait)
 
 ```bash
-python examples/ex02_trot_forward.py
+python3 examples/ex02_trot_forward.py
 ```
 
 Runs baseline and WBC sequentially, saves comparison plots and videos to `examples/results/`.
@@ -257,18 +257,11 @@ Runs baseline and WBC sequentially, saves comparison plots and videos to `exampl
 ### Run Multi-Gait Benchmark
 
 ```bash
-python examples/ex05_multi_gait_benchmark.py
+python3 examples/ex05_multi_gait_benchmark.py
 ```
 
 Runs all 4 gaits with both controllers, produces summary bar chart, per-gait cumulative violation plots, WBC timing plot, and videos. Results saved to `examples/results_mu08/` or `examples/results_mu03/` depending on `sim_params.py`.
 
-### Generate Comparison Videos
-
-```bash
-python examples/make_comparison_video.py
-```
-
-Renders side-by-side baseline vs WBC videos for all 4 gaits with title cards. Saved to `examples/results_*/comparison_all_gaits_mu*.mp4`.
 
 ### Output Files
 
@@ -281,6 +274,5 @@ torque_comparison_RL_trot_forward.png    # RL leg joint torques baseline vs WBC
 wbc_timing.png                           # WBC solve time across all gaits
 baseline_<gait>.mp4                      # Baseline simulation video per gait
 wbc_<gait>.mp4                           # WBC simulation video per gait
-comparison_all_gaits_mu*.mp4             # Side-by-side comparison video
 ```
 --
