@@ -92,7 +92,7 @@ def main():
     os.makedirs("checkpoints", exist_ok=True)
     checkpoint_cb = CheckpointCallback(
         save_freq   = 500_000 // args.n_envs,
-        save_path   = "checkpoints/",
+        save_path = "/content/drive/MyDrive/go2_checkpoints/",
         name_prefix = "go2_ppo",
     )
     eval_cb = EvalCallback(
