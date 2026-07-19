@@ -72,10 +72,9 @@ GAIT_DUTY = 0.6
 
 # Curriculum thresholds (total env steps)
 CURRICULUM = [
-    (0,        {"flat": 1.0, "slope": 0.0,  "step": 0.0,  "slope_max": 0.0,  "step_max": 0.0  }),
-    (1_000_000, {"flat": 0.4, "slope": 0.6,  "step": 0.0,  "slope_max": 5.0,  "step_max": 0.0  }),
-    (2_000_000, {"flat": 0.2, "slope": 0.5,  "step": 0.3,  "slope_max": 10.0, "step_max": 0.05 }),
-    (4_000_000, {"flat": 0.2, "slope": 0.4,  "step": 0.4,  "slope_max": 15.0, "step_max": 0.08 }),
+    (0,         {"flat": 0.1, "slope": 0.5, "step": 0.4, "slope_max": 5.0,  "step_max": 0.05}),
+    (500_000,   {"flat": 0.1, "slope": 0.5, "step": 0.4, "slope_max": 10.0, "step_max": 0.06}),
+    (1_500_000, {"flat": 0.1, "slope": 0.4, "step": 0.5, "slope_max": 15.0, "step_max": 0.08}),
 ]
 
 
