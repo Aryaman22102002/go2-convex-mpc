@@ -285,7 +285,7 @@ class Go2TerrainEnv(gym.Env):
 
         # Initialize robot pose with small noise
         self.data.qpos[:3]  = [0.0, 0.0, 0.35]          # base position
-        self.data.qpos[3:7] = [0.0, 0.0, 0.0, 1.0]      # base quaternion
+        self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # w first for MuJoCo
         self.data.qpos[7:]  = Q_STAND + rng.uniform(-0.05, 0.05, 12)
         self.data.qvel[:]   = rng.uniform(-0.05, 0.05, self.model.nv)
 
