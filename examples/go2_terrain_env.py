@@ -44,17 +44,22 @@ import os
 
 
 # PD gains for joint position control
-KP = np.array([20.0, 20.0, 20.0,   # FL hip, thigh, calf
-               20.0, 20.0, 20.0,   # FR
-               20.0, 20.0, 20.0,   # RL
-               20.0, 20.0, 20.0])  # RR
+KP = np.array([400.0, 400.0, 400.0,
+               400.0, 400.0, 400.0,
+               400.0, 400.0, 400.0,
+               400.0, 400.0, 400.0])
 
-KD = np.array([0.5, 0.5, 0.5,
-               0.5, 0.5, 0.5,
-               0.5, 0.5, 0.5,
-               0.5, 0.5, 0.5])
+KD = np.array([75.0, 75.0, 75.0,
+               75.0, 75.0, 75.0,
+               75.0, 75.0, 75.0,
+               75.0, 75.0, 75.0])
 
 TAU_MAX = np.array([23.7, 23.7, 45.43] * 4)
+
+# qpos[7:] joint order: FL, FR, RL, RR
+# ctrl actuator order:  FR, FL, RR, RL
+# This reindex maps qpos joints to actuator slots
+JOINT_REORDER = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
 
 # Default standing joint angles
 Q_STAND = np.array([0.0, 0.9, -1.8,   # FL
@@ -72,7 +77,9 @@ GAIT_DUTY = 0.6
 
 # Curriculum thresholds (total env steps)
 CURRICULUM = [
-    (0, {"flat": 1.0, "slope": 0.0, "step": 0.0, "slope_max": 0.0, "step_max": 0.0}),
+    (0,         {"flat": 0.1, "slope": 0.5, "step": 0.4, "slope_max": 5.0,  "step_max": 0.05}),
+    (500_000,   {"flat": 0.1, "slope": 0.5, "step": 0.4, "slope_max": 10.0, "step_max": 0.06}),
+    (1_500_000, {"flat": 0.1, "slope": 0.4, "step": 0.5, "slope_max": 15.0, "step_max": 0.08}),
 ]
 
 
@@ -94,7 +101,7 @@ class Go2TerrainEnv(gym.Env):
         self.sim_hz       = sim_hz
         self.ctrl_decim   = sim_hz // ctrl_hz
         self.dt_ctrl      = 1.0 / ctrl_hz
-        self.max_steps    = int(5.0 * ctrl_hz)   # 5 second episodes for standing
+        self.max_steps    = int(10.0 * ctrl_hz)  # 10 second episodes
 
         # shared step counter for curriculum (set externally by callback)
         self._total_steps = 0 if total_steps_ref is None else total_steps_ref
@@ -312,6 +319,10 @@ class Go2TerrainEnv(gym.Env):
 
         # Simulate at sim_hz
         for _ in range(self.ctrl_decim):
+            q_now  = self.data.qpos[7:19][JOINT_REORDER]
+            dq_now = self.data.qvel[6:18][JOINT_REORDER]
+            tau    = KP * (q_target - q_now) - KD * dq_now
+            tau    = np.clip(tau, -TAU_MAX, TAU_MAX)
             self.data.ctrl[:] = tau
             mujoco.mj_step(self.model, self.data)
 
@@ -360,9 +371,9 @@ class Go2TerrainEnv(gym.Env):
         lin_vel = d.qvel[0:3].copy()
         ang_vel = d.qvel[3:6].copy()
 
-        # Joint state
-        q_joints  = d.qpos[7:19].copy()
-        dq_joints = d.qvel[6:18].copy()
+        # Joint state -- reordered to match actuator convention (FR,FL,RR,RL)
+        q_joints  = d.qpos[7:19][JOINT_REORDER].copy()
+        dq_joints = d.qvel[6:18][JOINT_REORDER].copy()
 
         # Gait phase
         phase_sin = np.sin(self._phase)
@@ -404,18 +415,37 @@ class Go2TerrainEnv(gym.Env):
     def _compute_reward(self, action, tau):
         d = self.data
 
-        # Orientation -- exponential reward for staying upright
+        # Forward velocity (primary objective)
+        vx = d.qvel[0]
+        r_forward = np.clip(vx, -1.0, 2.0)
+
+        # Lateral velocity penalty (stay on track)
+        vy = d.qvel[1]
+        r_lateral = -0.3 * vy**2
+
+        # Orientation penalty (stay upright)
         qw, qx, qy, qz = d.qpos[3], d.qpos[4], d.qpos[5], d.qpos[6]
         roll  = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
         pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1, 1))
-        r_upright = np.exp(-5.0 * (roll**2 + pitch**2))
+        r_orient = -0.5 * (roll**2 + pitch**2)
 
-        # Height -- positive when at nominal standing height
+        # Torque penalty (energy efficiency)
+        r_torque = -1e-4 * np.sum(tau**2)
+
+        # Action smoothness (penalize jerky commands)
+        r_smooth = -0.05 * np.sum((action - self._prev_action)**2)
+
+        # Survival bonus
+        r_survive = 0.5
+
+        # Height bonus (stay at nominal height ~0.27m)
         height_err = d.qpos[2] - 0.27
-        r_height = np.exp(-10.0 * height_err**2)
+        r_height = -0.3 * height_err**2
 
-        # Total -- naturally 0 when fallen, up to 2.0 when standing perfectly
-        return float(r_upright + r_height)
+        total = (r_forward + r_lateral + r_orient +
+                 r_torque + r_smooth + r_survive + r_height)
+
+        return float(total)
 
     # ------------------------------------------------------------------
     # Termination
