@@ -415,37 +415,24 @@ class Go2TerrainEnv(gym.Env):
     def _compute_reward(self, action, tau):
         d = self.data
 
-        # Forward velocity (primary objective)
-        vx = d.qvel[0]
-        r_forward = np.clip(vx, -1.0, 2.0)
-
-        # Lateral velocity penalty (stay on track)
-        vy = d.qvel[1]
-        r_lateral = -0.3 * vy**2
-
-        # Orientation penalty (stay upright)
+        # Orientation -- exponential reward for staying upright
         qw, qx, qy, qz = d.qpos[3], d.qpos[4], d.qpos[5], d.qpos[6]
         roll  = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
         pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1, 1))
-        r_orient = -0.5 * (roll**2 + pitch**2)
+        r_upright = np.exp(-5.0 * (roll**2 + pitch**2))
 
-        # Torque penalty (energy efficiency)
-        r_torque = -1e-4 * np.sum(tau**2)
-
-        # Action smoothness (penalize jerky commands)
-        r_smooth = -0.05 * np.sum((action - self._prev_action)**2)
-
-        # Survival bonus
-        r_survive = 0.5
-
-        # Height bonus (stay at nominal height ~0.27m)
+        # Height -- positive when at nominal standing height
         height_err = d.qpos[2] - 0.27
-        r_height = -0.3 * height_err**2
+        r_height = np.exp(-10.0 * height_err**2)
 
-        total = (r_forward + r_lateral + r_orient +
-                 r_torque + r_smooth + r_survive + r_height)
+        # Penalize velocity -- robot should stand still, not slide
+        vx, vy = d.qvel[0], d.qvel[1]
+        r_vel = -0.5 * (vx**2 + vy**2)
 
-        return float(total)
+        # Penalize joint torques -- minimize effort while standing
+        r_torque = -1e-5 * np.sum(tau**2)
+
+        return float(r_upright + r_height + r_vel + r_torque)
 
     # ------------------------------------------------------------------
     # Termination
