@@ -72,9 +72,7 @@ GAIT_DUTY = 0.6
 
 # Curriculum thresholds (total env steps)
 CURRICULUM = [
-    (0,         {"flat": 0.1, "slope": 0.5, "step": 0.4, "slope_max": 5.0,  "step_max": 0.05}),
-    (500_000,   {"flat": 0.1, "slope": 0.5, "step": 0.4, "slope_max": 10.0, "step_max": 0.06}),
-    (1_500_000, {"flat": 0.1, "slope": 0.4, "step": 0.5, "slope_max": 15.0, "step_max": 0.08}),
+    (0, {"flat": 1.0, "slope": 0.0, "step": 0.0, "slope_max": 0.0, "step_max": 0.0}),
 ]
 
 
@@ -96,7 +94,7 @@ class Go2TerrainEnv(gym.Env):
         self.sim_hz       = sim_hz
         self.ctrl_decim   = sim_hz // ctrl_hz
         self.dt_ctrl      = 1.0 / ctrl_hz
-        self.max_steps    = int(10.0 * ctrl_hz)  # 10 second episodes
+        self.max_steps    = int(5.0 * ctrl_hz)   # 5 second episodes for standing
 
         # shared step counter for curriculum (set externally by callback)
         self._total_steps = 0 if total_steps_ref is None else total_steps_ref
@@ -406,37 +404,18 @@ class Go2TerrainEnv(gym.Env):
     def _compute_reward(self, action, tau):
         d = self.data
 
-        # Forward velocity (primary objective)
-        vx = d.qvel[0]
-        r_forward = np.clip(vx, -1.0, 2.0)
-
-        # Lateral velocity penalty (stay on track)
-        vy = d.qvel[1]
-        r_lateral = -0.3 * vy**2
-
-        # Orientation penalty (stay upright)
+        # Orientation -- exponential reward for staying upright
         qw, qx, qy, qz = d.qpos[3], d.qpos[4], d.qpos[5], d.qpos[6]
         roll  = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
         pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1, 1))
-        r_orient = -0.5 * (roll**2 + pitch**2)
+        r_upright = np.exp(-5.0 * (roll**2 + pitch**2))
 
-        # Torque penalty (energy efficiency)
-        r_torque = -1e-4 * np.sum(tau**2)
-
-        # Action smoothness (penalize jerky commands)
-        r_smooth = -0.05 * np.sum((action - self._prev_action)**2)
-
-        # Survival bonus
-        r_survive = 0.5
-
-        # Height bonus (stay at nominal height ~0.27m)
+        # Height -- positive when at nominal standing height
         height_err = d.qpos[2] - 0.27
-        r_height = -0.3 * height_err**2
+        r_height = np.exp(-10.0 * height_err**2)
 
-        total = (r_forward + r_lateral + r_orient +
-                 r_torque + r_smooth + r_survive + r_height)
-
-        return float(total)
+        # Total -- naturally 0 when fallen, up to 2.0 when standing perfectly
+        return float(r_upright + r_height)
 
     # ------------------------------------------------------------------
     # Termination
