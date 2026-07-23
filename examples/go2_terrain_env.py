@@ -77,9 +77,9 @@ GAIT_DUTY = 0.6
 
 # Curriculum thresholds (total env steps)
 CURRICULUM = [
-    (0,         {"flat": 0.1, "slope": 0.5, "step": 0.4, "slope_max": 5.0,  "step_max": 0.05}),
-    (500_000,   {"flat": 0.1, "slope": 0.5, "step": 0.4, "slope_max": 10.0, "step_max": 0.06}),
-    (1_500_000, {"flat": 0.1, "slope": 0.4, "step": 0.5, "slope_max": 15.0, "step_max": 0.08}),
+    (0,          {"flat": 1.0, "slope": 0.0, "step": 0.0, "slope_max": 0.0,  "step_max": 0.0  }),
+    (1_000_000,  {"flat": 0.4, "slope": 0.3, "step": 0.3, "slope_max": 8.0,  "step_max": 0.05 }),
+    (3_000_000,  {"flat": 0.2, "slope": 0.4, "step": 0.4, "slope_max": 15.0, "step_max": 0.08 }),
 ]
 
 
@@ -425,14 +425,21 @@ class Go2TerrainEnv(gym.Env):
         height_err = d.qpos[2] - 0.27
         r_height = np.exp(-10.0 * height_err**2)
 
-        # Penalize velocity -- robot should stand still, not slide
-        vx, vy = d.qvel[0], d.qvel[1]
-        r_vel = -0.5 * (vx**2 + vy**2)
+        # Forward velocity -- only reward when upright
+        vx = d.qvel[0]
+        r_forward = np.clip(vx, 0.0, 2.0) * r_upright
 
-        # Penalize joint torques -- minimize effort while standing
+        # Lateral velocity penalty
+        vy = d.qvel[1]
+        r_lateral = -0.5 * vy**2
+
+        # Torque penalty
         r_torque = -1e-5 * np.sum(tau**2)
 
-        return float(r_upright + r_height + r_vel + r_torque)
+        # Action smoothness
+        r_smooth = -0.01 * np.sum((action - self._prev_action)**2)
+
+        return float(r_upright + r_height + r_forward + r_lateral + r_torque + r_smooth)
 
     # ------------------------------------------------------------------
     # Termination
