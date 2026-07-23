@@ -439,7 +439,28 @@ class Go2TerrainEnv(gym.Env):
         # Action smoothness
         r_smooth = -0.01 * np.sum((action - self._prev_action)**2)
 
-        return float(r_upright + r_height + r_forward + r_lateral + r_torque + r_smooth)
+        # Gait reward -- incentivize trot pattern (FL+RR together, FR+RL together)
+        # Contact flags are in obs[46:50] but we compute directly from foot height
+        foot_names = ["FL_foot_joint", "FR_foot_joint",
+                      "RL_foot_joint", "RR_foot_joint"]
+        contacts = []
+        for fname in foot_names:
+            try:
+                fid = self.model.body(fname).id
+                contacts.append(float(d.xpos[fid, 2] < 0.05))
+            except Exception:
+                contacts.append(0.0)
+        FL, FR, RL, RR = contacts
+
+        # Trot: diagonal pairs (FL+RR) and (FR+RL) should alternate
+        trot_score = (FL * RR) + (FR * RL)   # 0 to 2
+        r_gait = 0.5 * trot_score
+
+        # Penalize all four feet on ground simultaneously (standing still)
+        r_no_stand = -0.3 * (FL * FR * RL * RR)
+
+        return float(r_upright + r_height + r_forward + r_lateral +
+                     r_torque + r_smooth + r_gait + r_no_stand)
 
     # ------------------------------------------------------------------
     # Termination
