@@ -425,10 +425,6 @@ class Go2TerrainEnv(gym.Env):
         height_err = d.qpos[2] - 0.27
         r_height = np.exp(-10.0 * height_err**2)
 
-        # Forward velocity -- only when upright
-        vx = d.qvel[0]
-        r_forward = np.clip(vx, 0.0, 2.0) * r_upright
-
         # Lateral velocity penalty
         vy = d.qvel[1]
         r_lateral = -0.5 * vy**2
@@ -451,19 +447,27 @@ class Go2TerrainEnv(gym.Env):
                 contacts.append(0.0)
         FL, FR, RL, RR = contacts
 
-        # Phase-based swing reward -- tells policy WHICH feet to lift WHEN
-        # FL+RR swing together (phase > 0), FR+RL swing together (phase < 0)
+        # Phase-based swing reward -- tells policy which feet to lift when
         phase_sin = np.sin(self._phase)
         fl_should_swing = float(phase_sin > 0)
         rr_should_swing = float(phase_sin > 0)
         fr_should_swing = float(phase_sin < 0)
         rl_should_swing = float(phase_sin < 0)
 
-        # Reward foot being airborne when it should swing
         r_swing = (fl_should_swing * (1.0 - FL) +
                    rr_should_swing * (1.0 - RR) +
                    fr_should_swing * (1.0 - FR) +
-                   rl_should_swing * (1.0 - RL)) * 0.4
+                   rl_should_swing * (1.0 - RL)) * 0.5
+
+        # trot_ok=1 only when exactly one diagonal pair is swinging
+        # This gates the forward velocity reward so hopping gives zero
+        pair_A = (1 - FL) * (1 - RR) * FR * RL   # FL+RR swinging, FR+RL stance
+        pair_B = (1 - FR) * (1 - RL) * FL * RR   # FR+RL swinging, FL+RR stance
+        trot_ok = float(pair_A > 0.5 or pair_B > 0.5)
+
+        # Forward velocity -- ONLY rewarded when trotting correctly
+        vx = d.qvel[0]
+        r_forward = np.clip(vx, 0.0, 2.0) * trot_ok * r_upright
 
         # Penalize all four feet on ground simultaneously
         r_no_stand = -0.5 * (FL * FR * RL * RR)
