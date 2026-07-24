@@ -415,17 +415,17 @@ class Go2TerrainEnv(gym.Env):
     def _compute_reward(self, action, tau):
         d = self.data
 
-        # Orientation -- exponential reward for staying upright
+        # Orientation
         qw, qx, qy, qz = d.qpos[3], d.qpos[4], d.qpos[5], d.qpos[6]
         roll  = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
         pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1, 1))
         r_upright = np.exp(-5.0 * (roll**2 + pitch**2))
 
-        # Height -- positive when at nominal standing height
+        # Height
         height_err = d.qpos[2] - 0.27
         r_height = np.exp(-10.0 * height_err**2)
 
-        # Forward velocity -- only reward when upright
+        # Forward velocity -- only when upright
         vx = d.qvel[0]
         r_forward = np.clip(vx, 0.0, 2.0) * r_upright
 
@@ -439,8 +439,7 @@ class Go2TerrainEnv(gym.Env):
         # Action smoothness
         r_smooth = -0.01 * np.sum((action - self._prev_action)**2)
 
-        # Gait reward -- incentivize trot pattern (FL+RR together, FR+RL together)
-        # Contact flags are in obs[46:50] but we compute directly from foot height
+        # Foot contact detection
         foot_names = ["FL_foot_joint", "FR_foot_joint",
                       "RL_foot_joint", "RR_foot_joint"]
         contacts = []
@@ -452,15 +451,25 @@ class Go2TerrainEnv(gym.Env):
                 contacts.append(0.0)
         FL, FR, RL, RR = contacts
 
-        # Trot: diagonal pairs (FL+RR) and (FR+RL) should alternate
-        trot_score = (FL * RR) + (FR * RL)   # 0 to 2
-        r_gait = 0.5 * trot_score
+        # Phase-based swing reward -- tells policy WHICH feet to lift WHEN
+        # FL+RR swing together (phase > 0), FR+RL swing together (phase < 0)
+        phase_sin = np.sin(self._phase)
+        fl_should_swing = float(phase_sin > 0)
+        rr_should_swing = float(phase_sin > 0)
+        fr_should_swing = float(phase_sin < 0)
+        rl_should_swing = float(phase_sin < 0)
 
-        # Penalize all four feet on ground simultaneously (standing still)
-        r_no_stand = -0.3 * (FL * FR * RL * RR)
+        # Reward foot being airborne when it should swing
+        r_swing = (fl_should_swing * (1.0 - FL) +
+                   rr_should_swing * (1.0 - RR) +
+                   fr_should_swing * (1.0 - FR) +
+                   rl_should_swing * (1.0 - RL)) * 0.4
+
+        # Penalize all four feet on ground simultaneously
+        r_no_stand = -0.5 * (FL * FR * RL * RR)
 
         return float(r_upright + r_height + r_forward + r_lateral +
-                     r_torque + r_smooth + r_gait + r_no_stand)
+                     r_torque + r_smooth + r_swing + r_no_stand)
 
     # ------------------------------------------------------------------
     # Termination
