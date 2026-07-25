@@ -320,6 +320,7 @@ class Go2TerrainEnv(gym.Env):
         self._step_count   = 0
         self._phase        = rng.uniform(0, 2 * np.pi)   # random phase start
         self._episode_reward = 0.0
+        self._init_yaw     = 0.0   # base starts at identity quaternion -> yaw = 0
 
         return self._get_obs(), {}
 
@@ -439,15 +440,21 @@ class Go2TerrainEnv(gym.Env):
         qw, qx, qy, qz = d.qpos[3], d.qpos[4], d.qpos[5], d.qpos[6]
         roll  = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
         pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1, 1))
+        yaw   = np.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy**2 + qz**2))
         r_upright = np.exp(-5.0 * (roll**2 + pitch**2))
+
+        # Yaw stability -- penalize drift from initial heading (fix: policy was spiraling)
+        yaw_err = np.arctan2(np.sin(yaw - self._init_yaw), np.cos(yaw - self._init_yaw))
+        r_yaw = -0.5 * yaw_err**2
 
         # Height
         height_err = d.qpos[2] - 0.27
         r_height = np.exp(-10.0 * height_err**2)
 
-        # Forward velocity
+        # Forward velocity -- capped at 0.6 m/s to match reference speed
+        # (fix: was uncapped at 2.0, causing policy to outrun the reference gait)
         vx = d.qvel[0]
-        r_forward = np.clip(vx, 0.0, 2.0) * r_upright * 0.5
+        r_forward = np.clip(vx, 0.0, 0.6) * r_upright * 0.3
 
         # Lateral velocity penalty
         vy = d.qvel[1]
@@ -458,6 +465,20 @@ class Go2TerrainEnv(gym.Env):
 
         # Action smoothness
         r_smooth = -0.01 * np.sum((action - self._prev_action)**2)
+
+        # Foot contact + clearance (fix: swing feet weren't lifting enough)
+        foot_names = ["FL_foot_joint", "FR_foot_joint",
+                      "RL_foot_joint", "RR_foot_joint"]
+        r_clearance = 0.0
+        for fname in foot_names:
+            try:
+                fid = self.model.body(fname).id
+                foot_z = d.xpos[fid, 2]
+                in_contact = foot_z < 0.05
+                if not in_contact:  # swing foot -- reward lifting
+                    r_clearance += np.clip(foot_z, 0, 0.15) * 0.5
+            except Exception:
+                pass
 
         # Imitation reward -- match MPC reference joint angles at current phase
         r_imitate = 0.0
@@ -476,8 +497,8 @@ class Go2TerrainEnv(gym.Env):
             joint_err = np.sum((q_now - ref_q)**2)
             r_imitate = np.exp(-2.0 * joint_err)
 
-        return float(r_upright + r_height + r_forward + r_lateral +
-                     r_torque + r_smooth + r_imitate)
+        return float(r_upright + r_yaw + r_height + r_forward + r_lateral +
+                     r_torque + r_smooth + r_clearance + r_imitate)
 
     # ------------------------------------------------------------------
     # Termination
