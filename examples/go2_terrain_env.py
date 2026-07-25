@@ -42,6 +42,26 @@ import xml.etree.ElementTree as ET
 import tempfile
 import os
 
+# Load MPC reference trajectories for imitation reward
+_REF_PATH = Path(__file__).resolve().parent / "data" / "mpc_reference.npz"
+_REF = None
+_REF_Q_FWD = None    # (2000, 12) joint angles for trot_forward
+_REF_PHASE_FWD = None  # (2000,) phase values
+
+def _load_reference():
+    global _REF, _REF_Q_FWD, _REF_PHASE_FWD
+    if _REF is not None:
+        return
+    if not _REF_PATH.exists():
+        print(f"[WARNING] MPC reference not found at {_REF_PATH}. Imitation reward disabled.")
+        return
+    _REF = np.load(_REF_PATH)
+    _REF_Q_FWD     = _REF["trot_forward_q"]      # (2000, 12)
+    _REF_PHASE_FWD = _REF["trot_forward_phase"]   # (2000,)
+    print(f"[INFO] MPC reference loaded: {_REF_Q_FWD.shape[0]} frames")
+
+_load_reference()
+
 
 # PD gains for joint position control
 KP = np.array([400.0, 400.0, 400.0,
@@ -425,9 +445,13 @@ class Go2TerrainEnv(gym.Env):
         height_err = d.qpos[2] - 0.27
         r_height = np.exp(-10.0 * height_err**2)
 
+        # Forward velocity
+        vx = d.qvel[0]
+        r_forward = np.clip(vx, 0.0, 2.0) * r_upright * 0.5
+
         # Lateral velocity penalty
         vy = d.qvel[1]
-        r_lateral = -0.5 * vy**2
+        r_lateral = -0.3 * vy**2
 
         # Torque penalty
         r_torque = -1e-5 * np.sum(tau**2)
@@ -435,45 +459,25 @@ class Go2TerrainEnv(gym.Env):
         # Action smoothness
         r_smooth = -0.01 * np.sum((action - self._prev_action)**2)
 
-        # Foot contact detection
-        foot_names = ["FL_foot_joint", "FR_foot_joint",
-                      "RL_foot_joint", "RR_foot_joint"]
-        contacts = []
-        for fname in foot_names:
-            try:
-                fid = self.model.body(fname).id
-                contacts.append(float(d.xpos[fid, 2] < 0.05))
-            except Exception:
-                contacts.append(0.0)
-        FL, FR, RL, RR = contacts
+        # Imitation reward -- match MPC reference joint angles at current phase
+        r_imitate = 0.0
+        if _REF_Q_FWD is not None:
+            # Find closest reference frame by phase
+            phase_diffs = np.abs(_REF_PHASE_FWD - self._phase)
+            # Handle wraparound
+            phase_diffs = np.minimum(phase_diffs, 2*np.pi - phase_diffs)
+            ref_idx = int(np.argmin(phase_diffs))
+            ref_q   = _REF_Q_FWD[ref_idx]
 
-        # Phase-based swing reward -- tells policy which feet to lift when
-        phase_sin = np.sin(self._phase)
-        fl_should_swing = float(phase_sin > 0)
-        rr_should_swing = float(phase_sin > 0)
-        fr_should_swing = float(phase_sin < 0)
-        rl_should_swing = float(phase_sin < 0)
+            # Current joint angles in actuator order
+            q_now = d.qpos[7:19][JOINT_REORDER]
 
-        r_swing = (fl_should_swing * (1.0 - FL) +
-                   rr_should_swing * (1.0 - RR) +
-                   fr_should_swing * (1.0 - FR) +
-                   rl_should_swing * (1.0 - RL)) * 0.5
-
-        # trot_ok=1 only when exactly one diagonal pair is swinging
-        # This gates the forward velocity reward so hopping gives zero
-        pair_A = (1 - FL) * (1 - RR) * FR * RL   # FL+RR swinging, FR+RL stance
-        pair_B = (1 - FR) * (1 - RL) * FL * RR   # FR+RL swinging, FL+RR stance
-        trot_ok = float(pair_A > 0.5 or pair_B > 0.5)
-
-        # Forward velocity -- ONLY rewarded when trotting correctly
-        vx = d.qvel[0]
-        r_forward = np.clip(vx, 0.0, 2.0) * trot_ok * r_upright
-
-        # Penalize all four feet on ground simultaneously
-        r_no_stand = -0.5 * (FL * FR * RL * RR)
+            # Exponential imitation reward -- 1.0 when matching perfectly
+            joint_err = np.sum((q_now - ref_q)**2)
+            r_imitate = np.exp(-2.0 * joint_err)
 
         return float(r_upright + r_height + r_forward + r_lateral +
-                     r_torque + r_smooth + r_swing + r_no_stand)
+                     r_torque + r_smooth + r_imitate)
 
     # ------------------------------------------------------------------
     # Termination
