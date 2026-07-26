@@ -45,20 +45,25 @@ import os
 # Load MPC reference trajectories for imitation reward
 _REF_PATH = Path(__file__).resolve().parent / "data" / "mpc_reference.npz"
 _REF = None
-_REF_Q_FWD = None    # (2000, 12) joint angles for trot_forward
-_REF_PHASE_FWD = None  # (2000,) phase values
+_REF_Q_FWD = None       # (2000, 12) joint angles for trot_forward
+_REF_DQ_FWD = None      # (2000, 12) joint velocities for trot_forward
+_REF_MASK_FWD = None    # (2000, 4)  foot contact mask for trot_forward
+_REF_PHASE_FWD = None   # (2000,) phase values (kept for observation features only)
 
 def _load_reference():
-    global _REF, _REF_Q_FWD, _REF_PHASE_FWD
+    global _REF, _REF_Q_FWD, _REF_DQ_FWD, _REF_MASK_FWD, _REF_PHASE_FWD
     if _REF is not None:
         return
     if not _REF_PATH.exists():
         print(f"[WARNING] MPC reference not found at {_REF_PATH}. Imitation reward disabled.")
         return
     _REF = np.load(_REF_PATH)
-    _REF_Q_FWD     = _REF["trot_forward_q"]      # (2000, 12)
+    _REF_Q_FWD     = _REF["trot_forward_q"]       # (2000, 12)
+    _REF_DQ_FWD    = _REF["trot_forward_dq"]      # (2000, 12)
+    _REF_MASK_FWD  = _REF["trot_forward_mask"]    # (2000, 4)
     _REF_PHASE_FWD = _REF["trot_forward_phase"]   # (2000,)
-    print(f"[INFO] MPC reference loaded: {_REF_Q_FWD.shape[0]} frames")
+    print(f"[INFO] MPC reference loaded: {_REF_Q_FWD.shape[0]} frames (q, dq, contact mask)")
+
 
 _load_reference()
 
@@ -469,36 +474,53 @@ class Go2TerrainEnv(gym.Env):
         # Foot contact + clearance (fix: swing feet weren't lifting enough)
         foot_names = ["FL_foot", "FR_foot",
                       "RL_foot", "RR_foot"]
+        contacts_now = np.zeros(4)
         r_clearance = 0.0
-        for fname in foot_names:
+        for i, fname in enumerate(foot_names):
             try:
                 fid = self.model.body(fname).id
                 foot_z = d.xpos[fid, 2]
                 in_contact = foot_z < 0.05
+                contacts_now[i] = 1.0 if in_contact else 0.0
                 if not in_contact:  # swing foot -- reward lifting
                     r_clearance += np.clip(foot_z, 0, 0.15) * 0.5
             except Exception:
                 pass
 
-        # Imitation reward -- match MPC reference joint angles at current phase
+        # Imitation reward -- nearest-neighbor match against the MPC reference
+        # (fix: self._phase is an open-loop metronome that drifts out of sync
+        # with the robot's real gait within an episode, since it isn't tied to
+        # the robot's actual state. Instead, find whichever reference frame the
+        # robot's CURRENT state most closely resembles -- using joint angles as
+        # the primary signal, joint velocities as a secondary signal, and the
+        # recorded contact pattern as a tiebreaker to disambiguate symmetric
+        # poses (e.g. front-swing vs back-swing configs that look similar in
+        # joint-angle-only space). This self-corrects regardless of any drift
+        # between the policy's real stride rate and the reference's recorded rate.)
         r_imitate = 0.0
+        r_vel_match = 0.0
         if _REF_Q_FWD is not None:
-            # Find closest reference frame by phase
-            phase_diffs = np.abs(_REF_PHASE_FWD - self._phase)
-            # Handle wraparound
-            phase_diffs = np.minimum(phase_diffs, 2*np.pi - phase_diffs)
-            ref_idx = int(np.argmin(phase_diffs))
-            ref_q   = _REF_Q_FWD[ref_idx]
+            q_now  = d.qpos[7:19][JOINT_REORDER]
+            dq_now = d.qvel[6:18][JOINT_REORDER]
 
-            # Current joint angles in actuator order
-            q_now = d.qpos[7:19][JOINT_REORDER]
+            q_dists    = np.sum((_REF_Q_FWD - q_now)**2, axis=1)
+            dq_dists   = np.sum((_REF_DQ_FWD - dq_now)**2, axis=1)
+            mask_dists = np.sum(np.abs(_REF_MASK_FWD - contacts_now), axis=1)
 
-            # Exponential imitation reward -- 1.0 when matching perfectly
+            combined_dist = q_dists + 0.05 * dq_dists + 0.1 * mask_dists
+            ref_idx = int(np.argmin(combined_dist))
+
+            ref_q  = _REF_Q_FWD[ref_idx]
+            ref_dq = _REF_DQ_FWD[ref_idx]
+
             joint_err = np.sum((q_now - ref_q)**2)
             r_imitate = np.exp(-2.0 * joint_err)
 
+            vel_err = np.sum((dq_now - ref_dq)**2)
+            r_vel_match = np.exp(-0.1 * vel_err)
+
         return float(r_upright + r_yaw + r_height + r_forward + r_lateral +
-                     r_torque + r_smooth + r_clearance + r_imitate)
+                     r_torque + r_smooth + r_clearance + r_imitate + r_vel_match)
 
     # ------------------------------------------------------------------
     # Termination
