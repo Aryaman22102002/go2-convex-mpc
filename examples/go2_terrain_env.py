@@ -401,8 +401,8 @@ class Go2TerrainEnv(gym.Env):
         phase_cos = np.cos(self._phase)
 
         # Foot contact flags (simple height check)
-        foot_names = ["FL_foot_joint", "FR_foot_joint",
-                      "RL_foot_joint", "RR_foot_joint"]
+        foot_names = ["FL_foot", "FR_foot",
+                      "RL_foot", "RR_foot"]
         contact_flags = np.zeros(4)
         for i, fname in enumerate(foot_names):
             try:
@@ -467,8 +467,8 @@ class Go2TerrainEnv(gym.Env):
         r_smooth = -0.01 * np.sum((action - self._prev_action)**2)
 
         # Foot contact + clearance (fix: swing feet weren't lifting enough)
-        foot_names = ["FL_foot_joint", "FR_foot_joint",
-                      "RL_foot_joint", "RR_foot_joint"]
+        foot_names = ["FL_foot", "FR_foot",
+                      "RL_foot", "RR_foot"]
         r_clearance = 0.0
         for fname in foot_names:
             try:
