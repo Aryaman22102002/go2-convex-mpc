@@ -50,6 +50,7 @@ _REF_DQ_FWD = None      # (2000, 12) joint velocities for trot_forward
 _REF_MASK_FWD = None    # (2000, 4)  foot contact mask for trot_forward
 _REF_PHASE_FWD = None   # (2000,) phase values (kept for observation features only)
 
+
 def _load_reference():
     global _REF, _REF_Q_FWD, _REF_DQ_FWD, _REF_MASK_FWD, _REF_PHASE_FWD
     if _REF is not None:
