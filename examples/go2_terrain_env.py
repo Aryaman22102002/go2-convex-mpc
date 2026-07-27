@@ -402,9 +402,25 @@ class Go2TerrainEnv(gym.Env):
         q_joints  = d.qpos[7:19][JOINT_REORDER].copy()
         dq_joints = d.qvel[6:18][JOINT_REORDER].copy()
 
-        # Gait phase
-        phase_sin = np.sin(self._phase)
-        phase_cos = np.cos(self._phase)
+        # Gait phase -- derived from the nearest-neighbor reference match found
+        # during the PREVIOUS step's reward computation (self._last_ref_idx),
+        # not from self._phase. self._phase is an open-loop clock that starts
+        # at a RANDOM value on every reset() and has no relationship to the
+        # robot's real gait state -- this was already identified as a problem
+        # for the reward function and fixed there, but the observation feature
+        # was still reading the same broken clock. Using the real matched
+        # reference's own phase value keeps this feature meaningful and
+        # consistent with how the BC-pretraining dataset was built (which used
+        # each reference frame's own true phase). One step of lag is expected
+        # and harmless (this step's obs reflects last step's match); the very
+        # first observation of an episode falls back to phase=0 since no match
+        # exists yet.
+        if self._last_ref_idx is not None and _REF_PHASE_FWD is not None:
+            matched_phase = _REF_PHASE_FWD[self._last_ref_idx]
+        else:
+            matched_phase = 0.0
+        phase_sin = np.sin(matched_phase)
+        phase_cos = np.cos(matched_phase)
 
         # Foot contact flags (simple height check)
         foot_names = ["FL_foot", "FR_foot",
