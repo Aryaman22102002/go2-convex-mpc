@@ -50,7 +50,6 @@ _REF_DQ_FWD = None      # (2000, 12) joint velocities for trot_forward
 _REF_MASK_FWD = None    # (2000, 4)  foot contact mask for trot_forward
 _REF_PHASE_FWD = None   # (2000,) phase values (kept for observation features only)
 
-
 def _load_reference():
     global _REF, _REF_Q_FWD, _REF_DQ_FWD, _REF_MASK_FWD, _REF_PHASE_FWD
     if _REF is not None:
@@ -327,6 +326,7 @@ class Go2TerrainEnv(gym.Env):
         self._phase        = rng.uniform(0, 2 * np.pi)   # random phase start
         self._episode_reward = 0.0
         self._init_yaw     = 0.0   # base starts at identity quaternion -> yaw = 0
+        self._last_ref_idx = None  # no continuity constraint on the first match
 
         return self._get_obs(), {}
 
@@ -489,18 +489,29 @@ class Go2TerrainEnv(gym.Env):
                 pass
 
         # Imitation reward -- nearest-neighbor match against the MPC reference
-        # (fix: self._phase is an open-loop metronome that drifts out of sync
-        # with the robot's real gait within an episode, since it isn't tied to
-        # the robot's actual state. Instead, find whichever reference frame the
-        # robot's CURRENT state most closely resembles -- using joint angles as
-        # the primary signal, joint velocities as a secondary signal, and the
-        # recorded contact pattern as a tiebreaker to disambiguate symmetric
-        # poses (e.g. front-swing vs back-swing configs that look similar in
-        # joint-angle-only space). This self-corrects regardless of any drift
-        # between the policy's real stride rate and the reference's recorded rate.)
+        # (fix 1, phase drift: self._phase is an open-loop metronome that drifts
+        # out of sync with the robot's real gait within an episode. Instead, find
+        # whichever reference frame the robot's CURRENT state most closely
+        # resembles.
+        #  fix 2, contact gating: mask distance is now weighted heavily (3.0)
+        # rather than as a small tiebreaker -- previously the match was almost
+        # entirely driven by joint-angle similarity, so it could match a frame
+        # with a completely different contact pattern (e.g. real feet all in
+        # air matched against a reference frame with all feet down) and still
+        # score r_imitate near 1.0. That let the policy hold a joint pose that
+        # resembled the reference without any of the real gait's contact timing.
+        #  fix 3, temporal continuity: without this, the matched reference index
+        # can teleport to an unrelated point in the 2000-frame trajectory between
+        # consecutive steps, causing the imitation target (and thus the desired
+        # joint angles) to jump discontinuously -- this showed up as a leg
+        # suddenly snapping into a lift/jump motion. A small penalty on circular
+        # distance from the previous match keeps the target moving smoothly
+        # through the gait cycle instead of jumping around.)
         r_imitate = 0.0
         r_vel_match = 0.0
+        ref_idx = None
         if _REF_Q_FWD is not None:
+            n_ref = _REF_Q_FWD.shape[0]
             q_now  = d.qpos[7:19][JOINT_REORDER]
             dq_now = d.qvel[6:18][JOINT_REORDER]
 
@@ -508,8 +519,27 @@ class Go2TerrainEnv(gym.Env):
             dq_dists   = np.sum((_REF_DQ_FWD - dq_now)**2, axis=1)
             mask_dists = np.sum(np.abs(_REF_MASK_FWD - contacts_now), axis=1)
 
-            combined_dist = q_dists + 0.05 * dq_dists + 0.1 * mask_dists
+            combined_dist = q_dists + 0.05 * dq_dists + 3.0 * mask_dists
+
+            # Hard window constraint (fix: the previous soft penalty (0.002 per
+            # frame of circular distance) was far too weak -- jumps of 300-1000
+            # frames still won out whenever joint/contact match elsewhere looked
+            # even slightly better, which was defeating the point of continuity
+            # entirely. Instead, restrict candidates to within a fixed radius of
+            # the previous match (~1 gait cycle, detected as 66 frames earlier),
+            # so a large teleport is structurally impossible rather than merely
+            # discouraged. Only the very first match of an episode (no previous
+            # index yet) searches the full reference.
+            REF_WINDOW_RADIUS = 40
+            if self._last_ref_idx is not None:
+                idxs = np.arange(n_ref)
+                raw_diff = np.abs(idxs - self._last_ref_idx)
+                circ_dist = np.minimum(raw_diff, n_ref - raw_diff)
+                in_window = circ_dist <= REF_WINDOW_RADIUS
+                combined_dist = np.where(in_window, combined_dist, np.inf)
+
             ref_idx = int(np.argmin(combined_dist))
+            self._last_ref_idx = ref_idx
 
             ref_q  = _REF_Q_FWD[ref_idx]
             ref_dq = _REF_DQ_FWD[ref_idx]
@@ -519,6 +549,15 @@ class Go2TerrainEnv(gym.Env):
 
             vel_err = np.sum((dq_now - ref_dq)**2)
             r_vel_match = np.exp(-0.1 * vel_err)
+
+        self._last_reward_components = {
+            "r_upright": r_upright, "r_yaw": r_yaw, "r_height": r_height,
+            "r_forward": r_forward, "r_lateral": r_lateral, "r_torque": r_torque,
+            "r_smooth": r_smooth, "r_clearance": r_clearance,
+            "r_imitate": r_imitate, "r_vel_match": r_vel_match,
+            "contacts_now": contacts_now.copy(),
+            "ref_mask": (_REF_MASK_FWD[ref_idx].copy() if _REF_Q_FWD is not None else None),
+        }
 
         return float(r_upright + r_yaw + r_height + r_forward + r_lateral +
                      r_torque + r_smooth + r_clearance + r_imitate + r_vel_match)
