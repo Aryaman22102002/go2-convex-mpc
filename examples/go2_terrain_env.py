@@ -118,7 +118,7 @@ class Go2TerrainEnv(gym.Env):
 
     def __init__(self, xml_path=None, render_mode=None,
                  ctrl_hz=50, sim_hz=1000,
-                 total_steps_ref=None):
+                 total_steps_ref=None, steps_per_tick=1):
         super().__init__()
 
         self.render_mode  = render_mode
@@ -128,8 +128,18 @@ class Go2TerrainEnv(gym.Env):
         self.dt_ctrl      = 1.0 / ctrl_hz
         self.max_steps    = int(10.0 * ctrl_hz)  # 10 second episodes
 
-        # shared step counter for curriculum (set externally by callback)
-        self._total_steps = 0 if total_steps_ref is None else total_steps_ref
+        # Curriculum step counter. total_steps_ref is the starting offset
+        # (the model's true cumulative trained steps at the time this env was
+        # created -- previously always 0, even on --resume, so curriculum
+        # silently restarted from scratch every training call). steps_per_tick
+        # accounts for running n_envs parallel environments: the model's real
+        # total_timesteps advances by n_envs every synchronized rollout step,
+        # but each individual env instance only sees its own local step() calls
+        # -- so each local increment should count as n_envs steps of true
+        # progress, or this env's curriculum will keep under-counting relative
+        # to the model's actual training progress for the rest of the session.
+        self._total_steps   = 0 if total_steps_ref is None else total_steps_ref
+        self._steps_per_tick = steps_per_tick
 
         # Find XML
         if xml_path is None:
@@ -356,7 +366,7 @@ class Go2TerrainEnv(gym.Env):
         # Advance gait phase
         self._phase = (self._phase + 2 * np.pi * GAIT_HZ * self.dt_ctrl) % (2 * np.pi)
         self._step_count  += 1
-        self._total_steps += 1
+        self._total_steps += self._steps_per_tick
 
         obs     = self._get_obs()
         reward  = self._compute_reward(action, tau)

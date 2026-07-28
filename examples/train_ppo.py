@@ -20,10 +20,12 @@ import numpy as np
 from pathlib import Path
 
 
-def make_env(xml_path, rank):
+def make_env(xml_path, rank, total_steps_ref=0, steps_per_tick=1):
     def _init():
         from go2_terrain_env import Go2TerrainEnv
-        env = Go2TerrainEnv(xml_path=xml_path)
+        env = Go2TerrainEnv(xml_path=xml_path,
+                             total_steps_ref=total_steps_ref,
+                             steps_per_tick=steps_per_tick)
         return env
     return _init
 
@@ -47,13 +49,33 @@ def main():
 
     set_random_seed(42)
 
-    print(f"Creating {args.n_envs} parallel environments...")
-    env_fns = [make_env(args.xml, i) for i in range(args.n_envs)]
+    # ------------------------------------------------------------------
+    # Determine the model's TRUE cumulative step count before creating any
+    # environments, so curriculum progression (gated on total_steps inside
+    # Go2TerrainEnv) reflects real training history instead of silently
+    # restarting from 0 on every --resume, which is what happened previously
+    # (make_env never passed total_steps_ref at all).
+    # ------------------------------------------------------------------
+    resume_path = args.resume + ".zip" if args.resume else None
+    starting_steps = 0
+    if resume_path and os.path.exists(resume_path):
+        print(f"Peeking at resumed model's step count from {resume_path}...")
+        _peek_model = PPO.load(args.resume, device="cpu")
+        starting_steps = int(_peek_model.num_timesteps)
+        print(f"  Resumed model has {starting_steps:,} true cumulative steps -- "
+              f"curriculum will start from this point, not 0.")
+        del _peek_model
+
+    print(f"Creating {args.n_envs} parallel environments "
+          f"(curriculum starting_steps={starting_steps:,}, steps_per_tick={args.n_envs})...")
+    env_fns = [make_env(args.xml, i, total_steps_ref=starting_steps, steps_per_tick=args.n_envs)
+               for i in range(args.n_envs)]
     vec_env  = VecMonitor(SubprocVecEnv(env_fns))
-    eval_env = VecMonitor(SubprocVecEnv([make_env(args.xml, 99)]))
+    eval_env = VecMonitor(SubprocVecEnv([make_env(args.xml, 99,
+                                                   total_steps_ref=starting_steps,
+                                                   steps_per_tick=args.n_envs)]))
 
     # Resume from checkpoint or create new model
-    resume_path = args.resume + ".zip" if args.resume else None
     if resume_path and os.path.exists(resume_path):
         print(f"Resuming from {resume_path}...")
         model = PPO.load(args.resume, env=vec_env, device="auto")
