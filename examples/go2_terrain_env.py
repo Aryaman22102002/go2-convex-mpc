@@ -337,6 +337,8 @@ class Go2TerrainEnv(gym.Env):
         self._episode_reward = 0.0
         self._init_yaw     = 0.0   # base starts at identity quaternion -> yaw = 0
         self._last_ref_idx = None  # no continuity constraint on the first match
+        self._foot_state_duration = np.zeros(4)  # consecutive steps in current contact state, per foot [FL,FR,RL,RR]
+        self._foot_prev_contact   = None          # previous step's contact bools, to detect state flips
 
         return self._get_obs(), {}
 
@@ -526,6 +528,34 @@ class Go2TerrainEnv(gym.Env):
         dist_b = np.sum(np.abs(contacts_now - pattern_b))
         r_sync = 1.0 - 0.25 * min(dist_a, dist_b)  # 1.0 if exactly matching either pattern
 
+        # Stuck-leg penalty (fix: both the clearance-gate and r_sync above
+        # turned out to be defeatable -- the clearance gate was circular
+        # (the reference match is partly CHOSEN to agree with real contacts,
+        # since mask_dists is part of the matching cost, so "reference
+        # expectation" just rubber-stamps whatever the robot is already
+        # doing), and r_sync only checks the INSTANTANEOUS 4-foot pattern,
+        # which a permanently-fixed pair (e.g. RL always stance, RR always
+        # swing) can still satisfy as long as the OTHER two feet alternate
+        # normally. This penalty is direct and non-circular: track real
+        # elapsed steps each foot has spent continuously in its current
+        # state, and penalize hard once any foot exceeds a reasonable bound
+        # -- independent of any reference match or other feet's behavior, so
+        # no single foot can hide in one state indefinitely.)
+        if self._foot_prev_contact is None:
+            self._foot_prev_contact = contacts_now.copy()
+        state_changed = (contacts_now != self._foot_prev_contact)
+        self._foot_state_duration = np.where(state_changed, 0, self._foot_state_duration + 1)
+        self._foot_prev_contact = contacts_now.copy()
+
+        MAX_STATE_DURATION = 20  # control steps (~0.4s at 50Hz) -- generous vs.
+                                 # reference's own ~8-step typical swing/stance
+        r_stuck_leg = 0.0
+        for i in range(4):
+            if self._foot_state_duration[i] > MAX_STATE_DURATION:
+                overage = self._foot_state_duration[i] - MAX_STATE_DURATION
+                r_stuck_leg -= 0.05 * overage
+
+
         # Imitation reward -- nearest-neighbor match against the MPC reference
         # (fix 1, phase drift: self._phase is an open-loop metronome that drifts
         # out of sync with the robot's real gait within an episode. Instead, find
@@ -630,12 +660,14 @@ class Go2TerrainEnv(gym.Env):
             "r_forward": r_forward, "r_lateral": r_lateral, "r_torque": r_torque,
             "r_smooth": r_smooth, "r_clearance": r_clearance,
             "r_imitate": r_imitate, "r_vel_match": r_vel_match, "r_sync": r_sync,
+            "r_stuck_leg": r_stuck_leg,
             "contacts_now": contacts_now.copy(),
             "ref_mask": (_REF_MASK_FWD[ref_idx].copy() if _REF_Q_FWD is not None else None),
         }
 
         return float(r_upright + r_yaw + r_height + r_forward + r_lateral +
-                     r_torque + r_smooth + r_clearance + r_imitate + r_vel_match + r_sync)
+                     r_torque + r_smooth + r_clearance + r_imitate + r_vel_match +
+                     r_sync + r_stuck_leg)
 
     # ------------------------------------------------------------------
     # Termination
