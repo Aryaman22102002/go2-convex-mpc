@@ -40,6 +40,11 @@ def main():
     parser.add_argument("--checkpoint_dir", type=str,   default="checkpoints/")
     parser.add_argument("--resume",         type=str,   default=None,
                         help="Path to existing policy zip (without .zip) to resume from")
+    parser.add_argument("--curriculum_start", type=int, default=None,
+                        help="Override the curriculum's starting step count (e.g. 0 to force "
+                             "a fresh flat->easy->hard ramp this session, regardless of the "
+                             "resumed model's true cumulative step count). If not set, uses "
+                             "the resumed model's real num_timesteps.")
     args = parser.parse_args()
 
     from stable_baselines3 import PPO
@@ -58,7 +63,11 @@ def main():
     # ------------------------------------------------------------------
     resume_path = args.resume + ".zip" if args.resume else None
     starting_steps = 0
-    if resume_path and os.path.exists(resume_path):
+    if args.curriculum_start is not None:
+        starting_steps = args.curriculum_start
+        print(f"Curriculum start explicitly overridden to {starting_steps:,} "
+              f"(ignoring resumed model's true step count, if any).")
+    elif resume_path and os.path.exists(resume_path):
         print(f"Peeking at resumed model's step count from {resume_path}...")
         _peek_model = PPO.load(args.resume, device="cpu")
         starting_steps = int(_peek_model.num_timesteps)
