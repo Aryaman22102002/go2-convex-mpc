@@ -498,27 +498,33 @@ class Go2TerrainEnv(gym.Env):
         # Action smoothness
         r_smooth = -0.01 * np.sum((action - self._prev_action)**2)
 
-        # Foot contact + clearance (fix: measured actual swing height on v10
-        # was only ~0.06-0.09m, well below the MPC reference's own recorded
-        # swing height of ~0.13-0.16m (confirmed via diag_reference.py earlier)
-        # -- the previous weight (0.5) clearly wasn't strong enough to push
-        # actual behavior anywhere near even its own 0.15 cap, let alone the
-        # reference's real range. Weight raised substantially and cap raised
-        # to match the reference's upper end.)
+        # Foot contact detection (clearance reward computed further below,
+        # after the reference match -- see note there for why)
         foot_names = ["FL_foot", "FR_foot",
                       "RL_foot", "RR_foot"]
         contacts_now = np.zeros(4)
-        r_clearance = 0.0
+        foot_heights = np.zeros(4)
         for i, fname in enumerate(foot_names):
             try:
                 fid = self.model.body(fname).id
                 foot_z = d.xpos[fid, 2]
-                in_contact = foot_z < 0.05
-                contacts_now[i] = 1.0 if in_contact else 0.0
-                if not in_contact:  # swing foot -- reward lifting
-                    r_clearance += np.clip(foot_z, 0, 0.16) * 3.0
+                foot_heights[i] = foot_z
+                contacts_now[i] = 1.0 if foot_z < 0.05 else 0.0
             except Exception:
                 pass
+
+        # Diagonal synchrony (explicit, direct signal for correct trot timing --
+        # complements the imitation/clearance rewards above, which only imply
+        # correct diagonal pairing indirectly through joint-angle/contact-mask
+        # matching. This directly rewards the real contact pattern for being
+        # close to either valid diagonal-trot configuration: FL+RR swinging
+        # while FR+RL stand, or the reverse. contacts_now order is
+        # [FL, FR, RL, RR]; 1=stance, 0=swing.)
+        pattern_a = np.array([0.0, 1.0, 1.0, 0.0])  # FL+RR swing, FR+RL stance
+        pattern_b = np.array([1.0, 0.0, 0.0, 1.0])  # FR+RL swing, FL+RR stance
+        dist_a = np.sum(np.abs(contacts_now - pattern_a))
+        dist_b = np.sum(np.abs(contacts_now - pattern_b))
+        r_sync = 1.0 - 0.25 * min(dist_a, dist_b)  # 1.0 if exactly matching either pattern
 
         # Imitation reward -- nearest-neighbor match against the MPC reference
         # (fix 1, phase drift: self._phase is an open-loop metronome that drifts
@@ -590,17 +596,46 @@ class Go2TerrainEnv(gym.Env):
             vel_err = np.sum((dq_now - ref_dq)**2)
             r_vel_match = np.exp(-0.1 * vel_err)
 
+        # Foot clearance (fix: measured actual swing height on v10 was only
+        # ~0.06-0.09m vs. the reference's own ~0.13-0.16m, so this weight was
+        # raised substantially -- but that alone created a new, worse exploit:
+        # since clearance was rewarded for ANY foot off the ground regardless
+        # of gait phase, a leg that simply never lands collects this reward
+        # every single step forever, which is a bigger and more reliable
+        # payoff than a real trot's swing phase (only ~30-50% duty cycle) --
+        # confirmed empirically: one leg (RR) went permanently airborne while
+        # its diagonal partner (RL) stayed permanently planted to compensate.
+        # Fix: only reward clearance for a foot when the MATCHED REFERENCE
+        # FRAME also expects that foot to be swinging right now (its own
+        # recorded mask says not-in-contact) -- this ties "reward for
+        # lifting" to the actual gait cycle instead of an open-ended
+        # "any air time is good" signal that a permanently-lifted leg could
+        # exploit indefinitely.
+        r_clearance = 0.0
+        if _REF_Q_FWD is not None and ref_idx is not None:
+            expected_mask = _REF_MASK_FWD[ref_idx]  # 1=stance, 0=swing, per reference
+            for i in range(4):
+                if expected_mask[i] < 0.5 and contacts_now[i] < 0.5:
+                    # reference expects swing AND foot is actually off the ground
+                    r_clearance += np.clip(foot_heights[i], 0, 0.16) * 3.0
+        else:
+            # no reference available -- fall back to the old unconditional
+            # behavior rather than giving zero clearance signal
+            for i in range(4):
+                if contacts_now[i] < 0.5:
+                    r_clearance += np.clip(foot_heights[i], 0, 0.16) * 3.0
+
         self._last_reward_components = {
             "r_upright": r_upright, "r_yaw": r_yaw, "r_height": r_height,
             "r_forward": r_forward, "r_lateral": r_lateral, "r_torque": r_torque,
             "r_smooth": r_smooth, "r_clearance": r_clearance,
-            "r_imitate": r_imitate, "r_vel_match": r_vel_match,
+            "r_imitate": r_imitate, "r_vel_match": r_vel_match, "r_sync": r_sync,
             "contacts_now": contacts_now.copy(),
             "ref_mask": (_REF_MASK_FWD[ref_idx].copy() if _REF_Q_FWD is not None else None),
         }
 
         return float(r_upright + r_yaw + r_height + r_forward + r_lateral +
-                     r_torque + r_smooth + r_clearance + r_imitate + r_vel_match)
+                     r_torque + r_smooth + r_clearance + r_imitate + r_vel_match + r_sync)
 
     # ------------------------------------------------------------------
     # Termination
