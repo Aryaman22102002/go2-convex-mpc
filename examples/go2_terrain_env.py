@@ -498,7 +498,13 @@ class Go2TerrainEnv(gym.Env):
         # Action smoothness
         r_smooth = -0.01 * np.sum((action - self._prev_action)**2)
 
-        # Foot contact + clearance (fix: swing feet weren't lifting enough)
+        # Foot contact + clearance (fix: measured actual swing height on v10
+        # was only ~0.06-0.09m, well below the MPC reference's own recorded
+        # swing height of ~0.13-0.16m (confirmed via diag_reference.py earlier)
+        # -- the previous weight (0.5) clearly wasn't strong enough to push
+        # actual behavior anywhere near even its own 0.15 cap, let alone the
+        # reference's real range. Weight raised substantially and cap raised
+        # to match the reference's upper end.)
         foot_names = ["FL_foot", "FR_foot",
                       "RL_foot", "RR_foot"]
         contacts_now = np.zeros(4)
@@ -510,7 +516,7 @@ class Go2TerrainEnv(gym.Env):
                 in_contact = foot_z < 0.05
                 contacts_now[i] = 1.0 if in_contact else 0.0
                 if not in_contact:  # swing foot -- reward lifting
-                    r_clearance += np.clip(foot_z, 0, 0.15) * 0.5
+                    r_clearance += np.clip(foot_z, 0, 0.16) * 3.0
             except Exception:
                 pass
 
@@ -547,21 +553,29 @@ class Go2TerrainEnv(gym.Env):
 
             combined_dist = q_dists + 0.05 * dq_dists + 3.0 * mask_dists
 
-            # Hard window constraint (fix: the previous soft penalty (0.002 per
-            # frame of circular distance) was far too weak -- jumps of 300-1000
-            # frames still won out whenever joint/contact match elsewhere looked
-            # even slightly better, which was defeating the point of continuity
-            # entirely. Instead, restrict candidates to within a fixed radius of
-            # the previous match (~1 gait cycle, detected as 66 frames earlier),
-            # so a large teleport is structurally impossible rather than merely
-            # discouraged. Only the very first match of an episode (no previous
-            # index yet) searches the full reference.
-            REF_WINDOW_RADIUS = 40
+            # Rate-correct window constraint (fix: the previous window was
+            # symmetric (+-40 frames around the previous match) and only
+            # prevented large TELEPORTS -- it never constrained the RATE of
+            # progression through the reference to match real elapsed time.
+            # Since the reference was recorded at 200Hz and the policy runs at
+            # 50Hz control, one control tick of real robot time should advance
+            # the match by ~4 reference frames -- but a symmetric +-40 window
+            # let the match race forward far faster than that (measured: the
+            # policy was cycling its gait ~4-7x faster than the reference's
+            # own recorded cadence) while still scoring well, since matching
+            # is purely on configuration similarity, not on real-time pace.
+            # Now the window is centered on the PHYSICALLY EXPECTED next
+            # index (last_match + ~4 frames) with a small tolerance for
+            # natural speed variation, rather than centered on the previous
+            # match with a wide radius in both directions.
+            REF_FRAMES_PER_CONTROL_STEP = 4   # 200Hz reference / 50Hz control
+            REF_WINDOW_SLACK = 6              # +- tolerance around expected advance
             if self._last_ref_idx is not None:
+                expected_idx = (self._last_ref_idx + REF_FRAMES_PER_CONTROL_STEP) % n_ref
                 idxs = np.arange(n_ref)
-                raw_diff = np.abs(idxs - self._last_ref_idx)
+                raw_diff = np.abs(idxs - expected_idx)
                 circ_dist = np.minimum(raw_diff, n_ref - raw_diff)
-                in_window = circ_dist <= REF_WINDOW_RADIUS
+                in_window = circ_dist <= REF_WINDOW_SLACK
                 combined_dist = np.where(in_window, combined_dist, np.inf)
 
             ref_idx = int(np.argmin(combined_dist))
