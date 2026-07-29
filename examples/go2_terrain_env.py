@@ -48,10 +48,19 @@ _REF = None
 _REF_Q_FWD = None       # (2000, 12) joint angles for trot_forward
 _REF_DQ_FWD = None      # (2000, 12) joint velocities for trot_forward
 _REF_MASK_FWD = None    # (2000, 4)  foot contact mask for trot_forward
-_REF_PHASE_FWD = None   # (2000,) phase values (kept for observation features only)
+_REF_PHASE_FWD = None   # (2000,) phase values
+_REF_BASE_QUAT_FWD = None   # (2000, 4) base orientation, (x,y,z,w) order
+_REF_BASE_HEIGHT_FWD = None # (2000,) base z height
+_REF_LINVEL_FWD = None      # (2000, 3) base linear velocity, finite-differenced
+_REF_ANGVEL_FWD = None      # (2000, 3) base angular velocity, finite-differenced
+
+REF_HZ = 200.0
+CONTROL_HZ = 50.0
+REF_FRAMES_PER_CONTROL_STEP = int(REF_HZ / CONTROL_HZ)  # 4 -- verified via diag_ref_rate.py
 
 def _load_reference():
     global _REF, _REF_Q_FWD, _REF_DQ_FWD, _REF_MASK_FWD, _REF_PHASE_FWD
+    global _REF_BASE_QUAT_FWD, _REF_BASE_HEIGHT_FWD, _REF_LINVEL_FWD, _REF_ANGVEL_FWD
     if _REF is not None:
         return
     if not _REF_PATH.exists():
@@ -62,7 +71,40 @@ def _load_reference():
     _REF_DQ_FWD    = _REF["trot_forward_dq"]      # (2000, 12)
     _REF_MASK_FWD  = _REF["trot_forward_mask"]    # (2000, 4)
     _REF_PHASE_FWD = _REF["trot_forward_phase"]   # (2000,)
-    print(f"[INFO] MPC reference loaded: {_REF_Q_FWD.shape[0]} frames (q, dq, contact mask)")
+
+    base_pos  = _REF["trot_forward_base_pos"]     # (2000, 3)
+    base_quat = _REF["trot_forward_base_quat"]    # (2000, 4), (x,y,z,w) order -- verified
+    _REF_BASE_QUAT_FWD   = base_quat
+    _REF_BASE_HEIGHT_FWD = base_pos[:, 2]
+
+    ref_dt = 1.0 / REF_HZ
+    N = base_pos.shape[0]
+
+    lin_vel = np.zeros((N, 3))
+    lin_vel[1:-1] = (base_pos[2:] - base_pos[:-2]) / (2 * ref_dt)
+    lin_vel[0]  = (base_pos[1] - base_pos[0]) / ref_dt
+    lin_vel[-1] = (base_pos[-1] - base_pos[-2]) / ref_dt
+    _REF_LINVEL_FWD = lin_vel
+
+    def quat_to_rpy(qq):
+        qx, qy, qz, qw = qq[:, 0], qq[:, 1], qq[:, 2], qq[:, 3]
+        roll  = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
+        pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1, 1))
+        yaw   = np.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy**2 + qz**2))
+        return roll, pitch, yaw
+
+    roll, pitch, yaw = quat_to_rpy(base_quat)
+    ang_vel = np.zeros((N, 3))
+    for arr, col in [(roll, 0), (pitch, 1), (yaw, 2)]:
+        dd = np.zeros(N)
+        dd[1:-1] = (arr[2:] - arr[:-2]) / (2 * ref_dt)
+        dd[0]  = (arr[1] - arr[0]) / ref_dt
+        dd[-1] = (arr[-1] - arr[-2]) / ref_dt
+        ang_vel[:, col] = dd
+    _REF_ANGVEL_FWD = ang_vel
+
+    print(f"[INFO] MPC reference loaded: {_REF_Q_FWD.shape[0]} frames "
+          f"(q, dq, contact mask, base pose/velocity)")
 
 
 _load_reference()
@@ -85,6 +127,7 @@ TAU_MAX = np.array([23.7, 23.7, 45.43] * 4)
 # ctrl actuator order:  FR, FL, RR, RL
 # This reindex maps qpos joints to actuator slots
 JOINT_REORDER = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+INV_JOINT_REORDER = np.argsort(JOINT_REORDER)  # converts actuator order -> qpos local order
 
 # Default standing joint angles
 Q_STAND = np.array([0.0, 0.9, -1.8,   # FL
@@ -98,16 +141,6 @@ Q_MAX = np.array([ 0.8,  3.4, -0.9] * 4)
 
 # Gait parameters for phase clock
 GAIT_HZ   = 3.0
-
-# Diagnostic flag: when True, the reference-matching step (used for
-# phase_sin/cos observation, imitation targets, clearance gating) advances
-# deterministically by a fixed frame count instead of using the contact-
-# weighted nearest-neighbor search. Used to test whether that matcher itself
-# is the cause of the diagonal-pair asymmetry (see chat history). Defaults to
-# False -- normal training and eval are completely unaffected unless a
-# diagnostic script explicitly sets this to True.
-DETERMINISTIC_REF_PROGRESSION = False
-
 GAIT_DUTY = 0.6
 
 # Curriculum thresholds (total env steps)
@@ -285,68 +318,78 @@ class Go2TerrainEnv(gym.Env):
         super().reset(seed=seed)
         rng = np.random.default_rng(seed)
 
-        # Sample terrain from curriculum
-        cfg = self._get_curriculum()
-        terrain_probs = [cfg["flat"], cfg["slope"], cfg["step"]]
-        # normalize
-        tp = np.array(terrain_probs)
-        tp = tp / tp.sum()
-        choice = rng.choice(["flat", "slope", "step"], p=tp)
-
-        slope_deg   = 0.0
-        step_height = 0.0
+        # Multi-terrain set aside for now -- focus is on getting a solid
+        # walking gait first. Forcing flat regardless of curriculum stage.
+        self._terrain_type = "flat"
         xml_to_load = str(self.xml_path)
 
-        if choice == "slope":
-            slope_deg = rng.uniform(-cfg["slope_max"], cfg["slope_max"])
-            # avoid tiny slopes
-            if abs(slope_deg) < 2.0:
-                slope_deg = np.sign(slope_deg) * 2.0 if slope_deg != 0 else 5.0
-            direction = "slope"
-            xml_to_load = self._make_terrain_xml("slope", slope_deg=slope_deg)
-            self._terrain_type = f"slope_{slope_deg:.1f}deg"
-
-        elif choice == "step":
-            step_height = rng.uniform(0.03, cfg["step_max"])
-            direction   = rng.choice(["step_up", "step_down"])
-            xml_to_load = self._make_terrain_xml(direction, step_height=step_height)
-            self._terrain_type = f"{direction}_{step_height*100:.1f}cm"
-
-        else:
-            self._terrain_type = "flat"
-
-        # Load model for this terrain
+        # Load model
         try:
             self.model = mujoco.MjModel.from_xml_path(xml_to_load)
         except Exception:
-            # Fallback to flat if XML generation failed
             self.model = mujoco.MjModel.from_xml_path(str(self.xml_path))
             self._terrain_type = "flat"
-
-        # Clean up temp file
-        if xml_to_load != str(self.xml_path) and os.path.exists(xml_to_load):
-            try:
-                os.unlink(xml_to_load)
-            except Exception:
-                pass
 
         self.model.opt.timestep = 1.0 / self.sim_hz
         self.data = mujoco.MjData(self.model)
 
-        # Initialize robot pose with small noise
-        self.data.qpos[:3]  = [0.0, 0.0, 0.35]          # base position
-        self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # w first for MuJoCo
-        self.data.qpos[7:]  = Q_STAND + rng.uniform(-0.05, 0.05, 12)
-        self.data.qvel[:]   = rng.uniform(-0.05, 0.05, self.model.nv)
+        # ------------------------------------------------------------
+        # Reference State Initialization (RSI): instead of always starting
+        # from a standing pose, start each episode with the robot's actual
+        # physical state (position, orientation, joint angles, all
+        # velocities) set directly from a RANDOM point along the recorded
+        # MPC reference gait cycle. Combined with a fully deterministic
+        # phase clock (see step()), this replaces the entire adaptive
+        # nearest-neighbor matching system that caused every feedback-loop
+        # problem found during debugging (contact-dependent phase
+        # selection, circular clearance gating, cadence drift). There is no
+        # matching left to game: the target at any moment is simply
+        # "wherever the reference would be if followed correctly since a
+        # known starting point."
+        # ------------------------------------------------------------
+        if _REF_Q_FWD is not None:
+            n_ref = _REF_Q_FWD.shape[0]
+            ref_start_idx = int(rng.integers(0, n_ref))
+            self._ref_start_idx = ref_start_idx
+
+            ref_q_local  = _REF_Q_FWD[ref_start_idx][INV_JOINT_REORDER]
+            ref_dq_local = _REF_DQ_FWD[ref_start_idx][INV_JOINT_REORDER]
+            ref_quat_xyzw = _REF_BASE_QUAT_FWD[ref_start_idx]
+            ref_height    = _REF_BASE_HEIGHT_FWD[ref_start_idx]
+            ref_linvel    = _REF_LINVEL_FWD[ref_start_idx]
+            ref_angvel    = _REF_ANGVEL_FWD[ref_start_idx]
+
+            self.data.qpos[0]   = 0.0   # reset episode-local x/y origin each time
+            self.data.qpos[1]   = 0.0
+            self.data.qpos[2]   = ref_height
+            # MuJoCo qpos quat order is (w,x,y,z); reference is (x,y,z,w)
+            qx, qy, qz, qw = ref_quat_xyzw
+            self.data.qpos[3:7] = [qw, qx, qy, qz]
+            self.data.qpos[7:]  = ref_q_local
+
+            self.data.qvel[0:3] = ref_linvel
+            self.data.qvel[3:6] = ref_angvel
+            self.data.qvel[6:]  = ref_dq_local
+        else:
+            self._ref_start_idx = 0
+            self.data.qpos[:3]  = [0.0, 0.0, 0.35]
+            self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+            self.data.qpos[7:]  = Q_STAND + rng.uniform(-0.05, 0.05, 12)
+            self.data.qvel[:]   = rng.uniform(-0.05, 0.05, self.model.nv)
+
+        self._episode_step = 0
+        self._last_ref_idx = self._ref_start_idx
 
         mujoco.mj_forward(self.model, self.data)
 
+        # Real starting yaw from whatever orientation RSI actually set (not
+        # hardcoded 0 -- RSI can start mid-stride at a non-identity heading)
+        qw, qx, qy, qz = self.data.qpos[3], self.data.qpos[4], self.data.qpos[5], self.data.qpos[6]
+        self._init_yaw = np.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy**2 + qz**2))
+
         self._prev_action  = np.zeros(self.n_joints)
         self._step_count   = 0
-        self._phase        = rng.uniform(0, 2 * np.pi)   # random phase start
         self._episode_reward = 0.0
-        self._init_yaw     = 0.0   # base starts at identity quaternion -> yaw = 0
-        self._last_ref_idx = None  # no continuity constraint on the first match
         self._foot_state_duration = np.zeros(4)  # consecutive steps in current contact state, per foot [FL,FR,RL,RR]
         self._foot_prev_contact   = None          # previous step's contact bools, to detect state flips
 
@@ -375,8 +418,17 @@ class Go2TerrainEnv(gym.Env):
             self.data.ctrl[:] = tau
             mujoco.mj_step(self.model, self.data)
 
-        # Advance gait phase
-        self._phase = (self._phase + 2 * np.pi * GAIT_HZ * self.dt_ctrl) % (2 * np.pi)
+        # Deterministic reference index (RSI + fixed-rate advance -- see
+        # reset() and the reward function for why this replaced the old
+        # adaptive nearest-neighbor matching entirely)
+        self._episode_step += 1
+        if _REF_Q_FWD is not None:
+            n_ref = _REF_Q_FWD.shape[0]
+            self._last_ref_idx = (self._ref_start_idx +
+                                   self._episode_step * REF_FRAMES_PER_CONTROL_STEP) % n_ref
+        else:
+            self._last_ref_idx = None
+
         self._step_count  += 1
         self._total_steps += self._steps_per_tick
 
@@ -424,19 +476,11 @@ class Go2TerrainEnv(gym.Env):
         q_joints  = d.qpos[7:19][JOINT_REORDER].copy()
         dq_joints = d.qvel[6:18][JOINT_REORDER].copy()
 
-        # Gait phase -- derived from the nearest-neighbor reference match found
-        # during the PREVIOUS step's reward computation (self._last_ref_idx),
-        # not from self._phase. self._phase is an open-loop clock that starts
-        # at a RANDOM value on every reset() and has no relationship to the
-        # robot's real gait state -- this was already identified as a problem
-        # for the reward function and fixed there, but the observation feature
-        # was still reading the same broken clock. Using the real matched
-        # reference's own phase value keeps this feature meaningful and
-        # consistent with how the BC-pretraining dataset was built (which used
-        # each reference frame's own true phase). One step of lag is expected
-        # and harmless (this step's obs reflects last step's match); the very
-        # first observation of an episode falls back to phase=0 since no match
-        # exists yet.
+        # Gait phase -- derived from the deterministic reference index
+        # (self._last_ref_idx, set in reset()/step() from Reference State
+        # Initialization + a fixed advance rate). This is always exactly
+        # correct and lag-free now, unlike the old adaptive nearest-neighbor
+        # match it replaced.
         if self._last_ref_idx is not None and _REF_PHASE_FWD is not None:
             matched_phase = _REF_PHASE_FWD[self._last_ref_idx]
         else:
@@ -566,79 +610,31 @@ class Go2TerrainEnv(gym.Env):
                 r_stuck_leg -= 0.05 * overage
 
 
-        # Imitation reward -- nearest-neighbor match against the MPC reference
-        # (fix 1, phase drift: self._phase is an open-loop metronome that drifts
-        # out of sync with the robot's real gait within an episode. Instead, find
-        # whichever reference frame the robot's CURRENT state most closely
-        # resembles.
-        #  fix 2, contact gating: mask distance is now weighted heavily (3.0)
-        # rather than as a small tiebreaker -- previously the match was almost
-        # entirely driven by joint-angle similarity, so it could match a frame
-        # with a completely different contact pattern (e.g. real feet all in
-        # air matched against a reference frame with all feet down) and still
-        # score r_imitate near 1.0. That let the policy hold a joint pose that
-        # resembled the reference without any of the real gait's contact timing.
-        #  fix 3, temporal continuity: without this, the matched reference index
-        # can teleport to an unrelated point in the 2000-frame trajectory between
-        # consecutive steps, causing the imitation target (and thus the desired
-        # joint angles) to jump discontinuously -- this showed up as a leg
-        # suddenly snapping into a lift/jump motion. A small penalty on circular
-        # distance from the previous match keeps the target moving smoothly
-        # through the gait cycle instead of jumping around.)
+        # Imitation reward -- direct lookup against the DETERMINISTIC
+        # reference index (self._last_ref_idx, set in step() from Reference
+        # State Initialization + a fixed 4-frames-per-control-step advance
+        # rate -- see reset() for the full rationale). This replaced an
+        # adaptive nearest-neighbor matching system that searched for
+        # whichever reference frame the robot's current state most closely
+        # resembled, weighted by joint angle, velocity, and contact pattern
+        # similarity, constrained to a small window to prevent teleporting.
+        # That system caused a cascade of feedback-loop bugs during
+        # debugging: it could match a frame with a completely wrong contact
+        # pattern; its "reference expectation" was partly CHOSEN to agree
+        # with real contacts (since contact-mask distance was part of the
+        # matching cost), making downstream gating on that expectation
+        # circular; and it let the policy control the pace of its own
+        # imitation target rather than being held to a fixed pace. None of
+        # that is possible anymore: the target is now simply "wherever the
+        # reference would be if followed correctly since a known random
+        # starting point," with no dependence on the robot's real state at
+        # all. This is the standard DeepMimic-style design.
         r_imitate = 0.0
         r_vel_match = 0.0
-        ref_idx = None
-        if _REF_Q_FWD is not None:
-            n_ref = _REF_Q_FWD.shape[0]
+        ref_idx = self._last_ref_idx
+        if _REF_Q_FWD is not None and ref_idx is not None:
             q_now  = d.qpos[7:19][JOINT_REORDER]
             dq_now = d.qvel[6:18][JOINT_REORDER]
-
-            q_dists    = np.sum((_REF_Q_FWD - q_now)**2, axis=1)
-            dq_dists   = np.sum((_REF_DQ_FWD - dq_now)**2, axis=1)
-            mask_dists = np.sum(np.abs(_REF_MASK_FWD - contacts_now), axis=1)
-
-            combined_dist = q_dists + 0.05 * dq_dists + 3.0 * mask_dists
-
-            # Rate-correct window constraint (fix: the previous window was
-            # symmetric (+-40 frames around the previous match) and only
-            # prevented large TELEPORTS -- it never constrained the RATE of
-            # progression through the reference to match real elapsed time.
-            # Since the reference was recorded at 200Hz and the policy runs at
-            # 50Hz control, one control tick of real robot time should advance
-            # the match by ~4 reference frames -- but a symmetric +-40 window
-            # let the match race forward far faster than that (measured: the
-            # policy was cycling its gait ~4-7x faster than the reference's
-            # own recorded cadence) while still scoring well, since matching
-            # is purely on configuration similarity, not on real-time pace.
-            # Now the window is centered on the PHYSICALLY EXPECTED next
-            # index (last_match + ~4 frames) with a small tolerance for
-            # natural speed variation, rather than centered on the previous
-            # match with a wide radius in both directions.
-            REF_FRAMES_PER_CONTROL_STEP = 4   # 200Hz reference / 50Hz control
-            REF_WINDOW_SLACK = 6              # +- tolerance around expected advance
-
-            if DETERMINISTIC_REF_PROGRESSION:
-                # Diagnostic mode: advance by a FIXED 4 frames/step with zero
-                # state-based correction, to test whether the contact-weighted
-                # matcher itself is what's causing the diagonal asymmetry (per
-                # external diagnosis). No retraining -- same frozen policy
-                # weights, just a different (open-loop) ref_idx computation
-                # feeding phase_sin/cos and imitation targets.
-                if self._last_ref_idx is None:
-                    ref_idx = 0  # fixed known starting phase, not q-based search
-                else:
-                    ref_idx = (self._last_ref_idx + REF_FRAMES_PER_CONTROL_STEP) % n_ref
-            else:
-                if self._last_ref_idx is not None:
-                    expected_idx = (self._last_ref_idx + REF_FRAMES_PER_CONTROL_STEP) % n_ref
-                    idxs = np.arange(n_ref)
-                    raw_diff = np.abs(idxs - expected_idx)
-                    circ_dist = np.minimum(raw_diff, n_ref - raw_diff)
-                    in_window = circ_dist <= REF_WINDOW_SLACK
-                    combined_dist = np.where(in_window, combined_dist, np.inf)
-                ref_idx = int(np.argmin(combined_dist))
-
-            self._last_ref_idx = ref_idx
 
             ref_q  = _REF_Q_FWD[ref_idx]
             ref_dq = _REF_DQ_FWD[ref_idx]
