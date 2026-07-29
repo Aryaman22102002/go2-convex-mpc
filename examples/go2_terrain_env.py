@@ -533,7 +533,16 @@ class Go2TerrainEnv(gym.Env):
 
         # Yaw stability -- penalize drift from initial heading (fix: policy was spiraling)
         yaw_err = np.arctan2(np.sin(yaw - self._init_yaw), np.cos(yaw - self._init_yaw))
-        r_yaw = -0.5 * yaw_err**2
+        # Yaw stability -- weight increased substantially (0.5 -> 4.0): at a
+        # typical observed yaw drift of ~0.15 rad, the old weight cost only
+        # -0.011 in reward, negligible next to imitation/clearance terms
+        # (0.1-1+ scale). Confirmed via diagnostics that rear-leg high-lift
+        # events (a REAL characteristic inherited from the reference gait,
+        # not a bug -- the MPC reference itself has rear feet swinging
+        # ~20-25% higher than front feet) correlate strongly with yaw drift
+        # the policy isn't adequately correcting for, unlike the real
+        # MPC controller's closed-loop feedback.
+        r_yaw = -4.0 * yaw_err**2
 
         # Height
         height_err = d.qpos[2] - 0.27
