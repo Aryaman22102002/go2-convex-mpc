@@ -45,12 +45,50 @@ def main():
                              "a fresh flat->easy->hard ramp this session, regardless of the "
                              "resumed model's true cumulative step count). If not set, uses "
                              "the resumed model's real num_timesteps.")
+    parser.add_argument("--lr_start", type=float, default=3e-4,
+                        help="Learning rate at the start of THIS training call.")
+    parser.add_argument("--lr_end", type=float, default=3e-5,
+                        help="Learning rate at the end of THIS training call (linear decay). "
+                             "Lower than SB3's PPO default; grounded in a published SB3+PPO "
+                             "legged-locomotion setup (Go1/Aliengo, lr=5e-5) rather than guessed.")
+    parser.add_argument("--gamma", type=float, default=0.95,
+                        help="Discount factor. Lowered from the previous 0.99 default, matching "
+                             "the same reference setup, for a shorter effective planning horizon.")
+    parser.add_argument("--ent_coef_start", type=float, default=0.01)
+    parser.add_argument("--ent_coef_end", type=float, default=0.001,
+                        help="Entropy coefficient decays linearly over THIS training call so "
+                             "exploration tapers off once a good policy is found, instead of "
+                             "continuing to churn a policy that already converged.")
     args = parser.parse_args()
 
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
-    from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
-    from stable_baselines3.common.utils import set_random_seed
+    from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, BaseCallback
+    from stable_baselines3.common.utils import set_random_seed, get_linear_fn, get_schedule_fn
+
+    class EntropyDecayCallback(BaseCallback):
+        """Linearly decays model.ent_coef over the course of THIS training
+        call. SB3's PPO does not support a schedule for ent_coef natively
+        (only learning_rate/clip_range do) -- this fills that gap so
+        exploration tapers off once the policy has found a good solution,
+        instead of continuing to push updates that can knock it off a good
+        local optimum (the pattern observed in v17: reward peaked partway
+        through an 8M-step run, then degraded for the remainder)."""
+        def __init__(self, start, end, total_steps, verbose=0):
+            super().__init__(verbose)
+            self.start = start
+            self.end = end
+            self.total_steps = total_steps
+            self._start_timesteps = None
+
+        def _on_training_start(self):
+            self._start_timesteps = self.num_timesteps
+
+        def _on_step(self):
+            steps_this_call = self.num_timesteps - self._start_timesteps
+            progress = min(1.0, steps_this_call / max(1, self.total_steps))
+            self.model.ent_coef = self.start + (self.end - self.start) * progress
+            return True
 
     set_random_seed(42)
 
@@ -84,25 +122,37 @@ def main():
                                                    total_steps_ref=starting_steps,
                                                    steps_per_tick=args.n_envs)]))
 
+    lr_schedule_fn = get_linear_fn(args.lr_start, args.lr_end, 1.0)
+
     # Resume from checkpoint or create new model
     if resume_path and os.path.exists(resume_path):
         print(f"Resuming from {resume_path}...")
         model = PPO.load(args.resume, env=vec_env, device="auto")
         model.set_env(vec_env)
-        print(f"  Loaded. Continuing training for {args.steps:,} more steps.")
+
+        # PPO.load() restores the CHECKPOINT'S OWN saved hyperparameters
+        # (including its original constant learning_rate and gamma=0.99) --
+        # overriding them here directly rather than relying on the loaded
+        # values, per diagnosed peak-then-degrade pattern in v17.
+        model.lr_schedule = get_schedule_fn(lr_schedule_fn)
+        model.gamma = args.gamma
+        model.ent_coef = args.ent_coef_start
+        print(f"  Loaded. Overriding schedule: lr {args.lr_start:.1e}->{args.lr_end:.1e}, "
+              f"gamma={args.gamma}, ent_coef {args.ent_coef_start}->{args.ent_coef_end}. "
+              f"Continuing training for {args.steps:,} more steps.")
     else:
         print("Starting fresh training...")
         model = PPO(
             policy        = "MlpPolicy",
             env           = vec_env,
-            learning_rate = args.lr,
+            learning_rate = lr_schedule_fn,
             n_steps       = 2048,
             batch_size    = 512,
             n_epochs      = 10,
-            gamma         = 0.99,
+            gamma         = args.gamma,
             gae_lambda    = 0.95,
             clip_range    = 0.2,
-            ent_coef      = 0.01,
+            ent_coef      = args.ent_coef_start,
             vf_coef       = 0.5,
             max_grad_norm = 0.5,
             policy_kwargs = dict(
@@ -136,9 +186,15 @@ def main():
         verbose              = 1,
     )
 
+    entropy_cb = EntropyDecayCallback(
+        start=args.ent_coef_start,
+        end=args.ent_coef_end,
+        total_steps=args.steps,
+    )
+
     model.learn(
         total_timesteps = args.steps,
-        callback        = [checkpoint_cb, eval_cb],
+        callback        = [checkpoint_cb, eval_cb, entropy_cb],
         progress_bar    = True,
         reset_num_timesteps = (args.resume is None),  # don't reset counter on resume
     )
