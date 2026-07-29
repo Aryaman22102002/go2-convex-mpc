@@ -98,6 +98,16 @@ Q_MAX = np.array([ 0.8,  3.4, -0.9] * 4)
 
 # Gait parameters for phase clock
 GAIT_HZ   = 3.0
+
+# Diagnostic flag: when True, the reference-matching step (used for
+# phase_sin/cos observation, imitation targets, clearance gating) advances
+# deterministically by a fixed frame count instead of using the contact-
+# weighted nearest-neighbor search. Used to test whether that matcher itself
+# is the cause of the diagonal-pair asymmetry (see chat history). Defaults to
+# False -- normal training and eval are completely unaffected unless a
+# diagnostic script explicitly sets this to True.
+DETERMINISTIC_REF_PROGRESSION = False
+
 GAIT_DUTY = 0.6
 
 # Curriculum thresholds (total env steps)
@@ -606,15 +616,28 @@ class Go2TerrainEnv(gym.Env):
             # match with a wide radius in both directions.
             REF_FRAMES_PER_CONTROL_STEP = 4   # 200Hz reference / 50Hz control
             REF_WINDOW_SLACK = 6              # +- tolerance around expected advance
-            if self._last_ref_idx is not None:
-                expected_idx = (self._last_ref_idx + REF_FRAMES_PER_CONTROL_STEP) % n_ref
-                idxs = np.arange(n_ref)
-                raw_diff = np.abs(idxs - expected_idx)
-                circ_dist = np.minimum(raw_diff, n_ref - raw_diff)
-                in_window = circ_dist <= REF_WINDOW_SLACK
-                combined_dist = np.where(in_window, combined_dist, np.inf)
 
-            ref_idx = int(np.argmin(combined_dist))
+            if DETERMINISTIC_REF_PROGRESSION:
+                # Diagnostic mode: advance by a FIXED 4 frames/step with zero
+                # state-based correction, to test whether the contact-weighted
+                # matcher itself is what's causing the diagonal asymmetry (per
+                # external diagnosis). No retraining -- same frozen policy
+                # weights, just a different (open-loop) ref_idx computation
+                # feeding phase_sin/cos and imitation targets.
+                if self._last_ref_idx is None:
+                    ref_idx = 0  # fixed known starting phase, not q-based search
+                else:
+                    ref_idx = (self._last_ref_idx + REF_FRAMES_PER_CONTROL_STEP) % n_ref
+            else:
+                if self._last_ref_idx is not None:
+                    expected_idx = (self._last_ref_idx + REF_FRAMES_PER_CONTROL_STEP) % n_ref
+                    idxs = np.arange(n_ref)
+                    raw_diff = np.abs(idxs - expected_idx)
+                    circ_dist = np.minimum(raw_diff, n_ref - raw_diff)
+                    in_window = circ_dist <= REF_WINDOW_SLACK
+                    combined_dist = np.where(in_window, combined_dist, np.inf)
+                ref_idx = int(np.argmin(combined_dist))
+
             self._last_ref_idx = ref_idx
 
             ref_q  = _REF_Q_FWD[ref_idx]
