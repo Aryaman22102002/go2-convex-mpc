@@ -356,10 +356,36 @@ class Go2TerrainEnv(gym.Env):
         super().reset(seed=seed)
         rng = np.random.default_rng(seed)
 
-        # Multi-terrain set aside for now -- focus is on getting a solid
-        # walking gait first. Forcing flat regardless of curriculum stage.
-        self._terrain_type = "flat"
+        # Multi-terrain curriculum restored now that flat-ground quality is
+        # validated (see README "Current status and next steps"). Terrain
+        # type is sampled per the curriculum stage; RSI below needs no
+        # height/orientation adjustment for non-flat terrain -- confirmed via
+        # direct geometry inspection that all three terrain generators (flat,
+        # slope, step_up, step_down) place ground height at exactly 0 at the
+        # spawn point (x=0, y=0). Note: for slope terrain, the robot's
+        # initial orientation is intentionally left matching the flat-ground
+        # reference (not pre-tilted to match the local slope normal) --
+        # handling that initial mismatch is part of what the policy needs to
+        # learn to be robust, not something to hand-correct away.
+        cfg = self._get_curriculum()
+        terrain_probs = np.array([cfg["flat"], cfg["slope"], cfg["step"]])
+        terrain_probs = terrain_probs / terrain_probs.sum()
+        choice = rng.choice(["flat", "slope", "step"], p=terrain_probs)
+
         xml_to_load = str(self.xml_path)
+        if choice == "slope":
+            slope_deg = rng.uniform(-cfg["slope_max"], cfg["slope_max"])
+            if abs(slope_deg) < 2.0:
+                slope_deg = np.sign(slope_deg) * 2.0 if slope_deg != 0 else 5.0
+            xml_to_load = self._make_terrain_xml("slope", slope_deg=slope_deg)
+            self._terrain_type = f"slope_{slope_deg:.1f}deg"
+        elif choice == "step":
+            step_height = rng.uniform(0.03, cfg["step_max"])
+            direction = rng.choice(["step_up", "step_down"])
+            xml_to_load = self._make_terrain_xml(direction, step_height=step_height)
+            self._terrain_type = f"{direction}_{step_height*100:.1f}cm"
+        else:
+            self._terrain_type = "flat"
 
         # Load model
         try:
@@ -367,6 +393,13 @@ class Go2TerrainEnv(gym.Env):
         except Exception:
             self.model = mujoco.MjModel.from_xml_path(str(self.xml_path))
             self._terrain_type = "flat"
+
+        # Clean up temp terrain file
+        if xml_to_load != str(self.xml_path) and os.path.exists(xml_to_load):
+            try:
+                os.unlink(xml_to_load)
+            except Exception:
+                pass
 
         self.model.opt.timestep = 1.0 / self.sim_hz
         self.data = mujoco.MjData(self.model)
