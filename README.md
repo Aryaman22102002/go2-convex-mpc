@@ -4,6 +4,8 @@
 
 This fork extends the base controller with a **Whole-Body Control (WBC) QP** that replaces the naive $\tau = J^T f$ stance torque mapping with a full rigid-body optimization. The WBC enforces friction cone constraints and torque limits at the joint level, eliminating the constraint violations that occur in the baseline controller across all gaits and surface conditions.
 
+Separately, this fork also explores a **learned (RL) alternative to the MPC+WBC controller**: a PPO policy trained via behavior cloning and imitation learning against trajectories recorded from the MPC+WBC controller itself. After an extensive debugging process (documented below), the policy now reliably reproduces a stable flat-ground trot -- 100% survival and consistent gait symmetry across 30 evaluation rollouts. Multi-terrain locomotion (slopes, steps) is the natural next step, building on this validated flat-ground foundation.
+
 ---
 
 ## Table of Contents
