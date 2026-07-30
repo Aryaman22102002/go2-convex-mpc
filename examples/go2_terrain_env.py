@@ -372,6 +372,7 @@ class Go2TerrainEnv(gym.Env):
         terrain_probs = terrain_probs / terrain_probs.sum()
         choice = rng.choice(["flat", "slope", "step"], p=terrain_probs)
 
+        self._current_slope_deg = 0.0  # used by RSI below to tilt initial orientation
         xml_to_load = str(self.xml_path)
         if choice == "slope":
             slope_deg = rng.uniform(-cfg["slope_max"], cfg["slope_max"])
@@ -379,6 +380,7 @@ class Go2TerrainEnv(gym.Env):
                 slope_deg = np.sign(slope_deg) * 2.0 if slope_deg != 0 else 5.0
             xml_to_load = self._make_terrain_xml("slope", slope_deg=slope_deg)
             self._terrain_type = f"slope_{slope_deg:.1f}deg"
+            self._current_slope_deg = slope_deg
         elif choice == "step":
             step_height = rng.uniform(0.03, cfg["step_max"])
             direction = rng.choice(["step_up", "step_down"])
@@ -435,6 +437,44 @@ class Go2TerrainEnv(gym.Env):
             self.data.qpos[2]   = ref_height
             # MuJoCo qpos quat order is (w,x,y,z); reference is (x,y,z,w)
             qx, qy, qz, qw = ref_quat_xyzw
+
+            # Slope-tilt correction (fix: RSI previously placed the robot in
+            # its flat-ground-recorded orientation regardless of actual slope
+            # tilt. Confirmed via direct diagnostic: even a shallow 2 deg
+            # slope produced 3+cm foot-ground gaps at reset (feet are offset
+            # ~0.2-0.3m from the base center, so on a tilted plane they sit
+            # at a genuinely different height than a flat-ground assumption
+            # implies), and steeper slopes produced gaps up to 11cm floating
+            # / 4cm penetrating -- easily enough to destabilize the robot
+            # before the policy gets a chance to react, matching the
+            # observed near-instant falls (2-7 steps) regardless of slope
+            # severity. Fix: compose an additional world-frame rotation about
+            # the Y axis, matching the slope angle, into the initial
+            # orientation so the whole rigid body (and therefore all four
+            # feet, fixed relative to the base) tilts together with the
+            # ground rather than staying level on top of it.)
+            if self._current_slope_deg != 0.0:
+                theta = np.radians(self._current_slope_deg)
+                tw, tx, ty, tz = np.cos(theta/2), 0.0, np.sin(theta/2), 0.0
+                # Quaternion composition (w,x,y,z): q_new = q_tilt (x) q_recorded
+                new_qw = tw*qw - tx*qx - ty*qy - tz*qz
+                new_qx = tw*qx + tx*qw + ty*qz - tz*qy
+                new_qy = tw*qy - tx*qz + ty*qw + tz*qx
+                new_qz = tw*qz + tx*qy - ty*qx + tz*qw
+                qw, qx, qy, qz = new_qw, new_qx, new_qy, new_qz
+
+                # Rotate world-frame base velocities by the same tilt rotation
+                # (fix per external review: rotating the pose while leaving a
+                # flat-ground world-frame velocity unchanged creates a smaller
+                # but still real reset inconsistency).
+                Ry = np.array([
+                    [np.cos(theta), 0, np.sin(theta)],
+                    [0,              1, 0            ],
+                    [-np.sin(theta), 0, np.cos(theta)],
+                ])
+                ref_linvel = Ry @ ref_linvel
+                ref_angvel = Ry @ ref_angvel
+
             self.data.qpos[3:7] = [qw, qx, qy, qz]
             self.data.qpos[7:]  = ref_q_local
 
