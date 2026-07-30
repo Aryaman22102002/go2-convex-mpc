@@ -612,18 +612,9 @@ class Go2TerrainEnv(gym.Env):
             except Exception:
                 pass
 
-        # Diagonal synchrony (explicit, direct signal for correct trot timing --
-        # complements the imitation/clearance rewards above, which only imply
-        # correct diagonal pairing indirectly through joint-angle/contact-mask
-        # matching. This directly rewards the real contact pattern for being
-        # close to either valid diagonal-trot configuration: FL+RR swinging
-        # while FR+RL stand, or the reverse. contacts_now order is
-        # [FL, FR, RL, RR]; 1=stance, 0=swing.)
-        pattern_a = np.array([0.0, 1.0, 1.0, 0.0])  # FL+RR swing, FR+RL stance
-        pattern_b = np.array([1.0, 0.0, 0.0, 1.0])  # FR+RL swing, FL+RR stance
-        dist_a = np.sum(np.abs(contacts_now - pattern_a))
-        dist_b = np.sum(np.abs(contacts_now - pattern_b))
-        r_sync = 1.0 - 0.25 * min(dist_a, dist_b)  # 1.0 if exactly matching either pattern
+        # r_sync computed further below, after ref_idx is known (needs to be
+        # phase-conditioned against the actual expected contact pattern, not
+        # just "any valid trot pattern" -- see note there)
 
         # Stuck-leg penalty (fix: both the clearance-gate and r_sync above
         # turned out to be defeatable -- the clearance gate was circular
@@ -759,7 +750,30 @@ class Go2TerrainEnv(gym.Env):
                     overshoot = max(0.0, foot_heights[i] - target - OVERSHOOT_TOLERANCE)
                     r_clearance += -OVERSHOOT_WEIGHT * overshoot**2
 
-
+        # Diagonal synchrony -- FIXED to be phase-conditioned (per external
+        # review). The previous version rewarded matching EITHER valid trot
+        # pattern (FL+RR swing / FR+RL stance, or the reverse) regardless of
+        # which one the deterministic clock actually expects right now --
+        # meaning the robot could get full sync credit for being in the
+        # WRONG diagonal relative to the reference's real phase, which
+        # doesn't enforce genuine phase-locking and likely contributed to
+        # imperfect diagonal sync (60-90% rather than a clean 80-100%).
+        # Now directly compares real contacts against the reference's own
+        # recorded mask AT THE CURRENT ref_idx -- rewarding the specific
+        # pattern the clock expects, not just "some valid trot pattern."
+        r_sync = 0.0
+        if _REF_Q_FWD is not None and ref_idx is not None:
+            ref_mask_now = _REF_MASK_FWD[ref_idx]  # [FL,FR,RL,RR], 1=stance, 0=swing
+            hamming_dist = np.sum(np.abs(contacts_now - ref_mask_now))
+            r_sync = 1.0 - 0.25 * hamming_dist  # 1.0 if exactly matching the expected pattern
+        else:
+            # no reference available -- fall back to the old phase-invariant
+            # version rather than giving zero signal
+            pattern_a = np.array([0.0, 1.0, 1.0, 0.0])
+            pattern_b = np.array([1.0, 0.0, 0.0, 1.0])
+            dist_a = np.sum(np.abs(contacts_now - pattern_a))
+            dist_b = np.sum(np.abs(contacts_now - pattern_b))
+            r_sync = 1.0 - 0.25 * min(dist_a, dist_b)
 
         self._last_reward_components = {
             "r_upright": r_upright, "r_yaw": r_yaw, "r_height": r_height,
