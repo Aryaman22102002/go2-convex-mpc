@@ -52,6 +52,7 @@ _REF_PHASE_FWD = None   # (2000,) phase values
 _REF_BASE_QUAT_FWD = None   # (2000, 4) base orientation, (x,y,z,w) order
 _REF_BASE_HEIGHT_FWD = None # (2000,) base z height
 _REF_LINVEL_FWD = None      # (2000, 3) base linear velocity, finite-differenced
+_REF_FOOT_HEIGHT_FWD = None # (2000, 4) real instantaneous foot heights [FL,FR,RL,RR], computed via forward kinematics -- see _ensure_ref_foot_heights()
 _REF_ANGVEL_FWD = None      # (2000, 3) base angular velocity, finite-differenced
 
 REF_HZ = 200.0
@@ -108,6 +109,41 @@ def _load_reference():
 
 
 _load_reference()
+
+
+def _ensure_ref_foot_heights(model):
+    """Precompute the REAL instantaneous foot height for every reference
+    frame, via forward kinematics -- replaying each frame's actual recorded
+    base pose and joint angles (same state-replay approach as
+    compute_dynamic_targets.py) and reading the resulting foot body
+    positions. This gives a per-step target that naturally has the correct
+    low-high-low swing shape, rather than a flat constant "peak" target
+    applied for the whole swing duration (which was tried and found to
+    actively worsen the front/rear lift ratio -- see chat history: a real
+    swing arcs up then down, so a constant target either punishes normal
+    low-height moments near liftoff/touchdown, or -- once made one-sided --
+    still doesn't reward the correct shape, just "more is better up to a
+    flat ceiling" the whole time). Runs once per process (SubprocVecEnv
+    means each worker computes its own copy; cheap, ~2000 forward-kinematics
+    calls).
+    """
+    global _REF_FOOT_HEIGHT_FWD
+    if _REF_FOOT_HEIGHT_FWD is not None or _REF_Q_FWD is None:
+        return
+    data = mujoco.MjData(model)
+    foot_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+    foot_ids = [model.body(f).id for f in foot_names]
+    N = _REF_Q_FWD.shape[0]
+    heights = np.zeros((N, 4))
+    for i in range(N):
+        qx, qy, qz, qw = _REF_BASE_QUAT_FWD[i]
+        data.qpos[0:3]  = [0.0, 0.0, _REF_BASE_HEIGHT_FWD[i]]
+        data.qpos[3:7]  = [qw, qx, qy, qz]
+        data.qpos[7:19] = _REF_Q_FWD[i][INV_JOINT_REORDER]
+        mujoco.mj_forward(model, data)
+        for j, fid in enumerate(foot_ids):
+            heights[i, j] = data.xpos[fid, 2]
+    _REF_FOOT_HEIGHT_FWD = heights
 
 
 # PD gains for joint position control
@@ -194,6 +230,8 @@ class Go2TerrainEnv(gym.Env):
         # Load base model to get dims
         self._model_flat = mujoco.MjModel.from_xml_path(str(self.xml_path))
         self._data_flat  = mujoco.MjData(self._model_flat)
+
+        _ensure_ref_foot_heights(self._model_flat)
 
         self.n_joints = 12   # actuated joints
         self.n_obs    = 2 + 3 + 3 + 12 + 12 + 12 + 2 + 3 + 4 + 1  # = 54
@@ -533,16 +571,12 @@ class Go2TerrainEnv(gym.Env):
 
         # Yaw stability -- penalize drift from initial heading (fix: policy was spiraling)
         yaw_err = np.arctan2(np.sin(yaw - self._init_yaw), np.cos(yaw - self._init_yaw))
-        # Yaw stability -- weight increased substantially (0.5 -> 4.0): at a
-        # typical observed yaw drift of ~0.15 rad, the old weight cost only
-        # -0.011 in reward, negligible next to imitation/clearance terms
-        # (0.1-1+ scale). Confirmed via diagnostics that rear-leg high-lift
-        # events (a REAL characteristic inherited from the reference gait,
-        # not a bug -- the MPC reference itself has rear feet swinging
-        # ~20-25% higher than front feet) correlate strongly with yaw drift
-        # the policy isn't adequately correcting for, unlike the real
-        # MPC controller's closed-loop feedback.
-        r_yaw = -4.0 * yaw_err**2
+        # Yaw stability -- weight kept at original value for THIS training
+        # run, deliberately, so the effect of the clearance-overshoot fix
+        # above can be cleanly attributed. If yaw drift improves once rear-
+        # leg overshoot is corrected, that confirms it as the root cause
+        # rather than something needing its own independent fix.
+        r_yaw = -0.5 * yaw_err**2
 
         # Height
         height_err = d.qpos[2] - 0.27
@@ -669,19 +703,63 @@ class Go2TerrainEnv(gym.Env):
         # lifting" to the actual gait cycle instead of an open-ended
         # "any air time is good" signal that a permanently-lifted leg could
         # exploit indefinitely.
+        #
+        # Second fix: the previous clip(0,0.16) reward SATURATES at 0.16 but
+        # never decreases beyond it -- a foot lifting to 0.21m scores
+        # identically to one lifting exactly 0.16m, so nothing discouraged
+        # overshoot. Confirmed via diagnostics: the real reference gait has
+        # rear feet swinging ~22% higher than front feet (front~0.13m,
+        # rear~0.16m) -- a real, intentional asymmetry -- but the trained
+        # policy exaggerated this to ~49% higher, well beyond the reference,
+        # and that EXCESS (not the natural asymmetry) correlated strongly
+        # with real, accumulating yaw drift.
+        #
+        # FIRST ATTEMPT (symmetric peaked reward centered on a flat constant
+        # target) made things WORSE (ratio went to 84%, fall rate regressed).
+        # SECOND ATTEMPT (one-sided penalty, still a flat constant target)
+        # fixed the "punishes normal low-height moments" issue but still
+        # didn't reward the correct shape: a real swing arcs low-high-low,
+        # so a flat ceiling for the WHOLE swing duration still isn't right
+        # right before touchdown, when the foot should legitimately be low
+        # again. FINAL FIX: use the REAL instantaneous reference foot height
+        # at the current deterministic ref_idx (precomputed via forward
+        # kinematics, see _ensure_ref_foot_heights) as the target -- this
+        # naturally has the correct low-high-low shape throughout the swing,
+        # rather than any hand-picked flat value.
+        #
+        # Tolerance band added per external review: without it, a foot that's
+        # basically on-target but has a modest phase lag relative to the
+        # deterministic clock (e.g. physically still near apex while the
+        # clock has already advanced toward touchdown) gets treated as a
+        # large amplitude overshoot even though the swing shape may be
+        # approximately correct. 1.5cm tolerance avoids penalizing this kind
+        # of timing noise while still catching genuine overshoot (e.g. the
+        # ~0.21m rear-leg spikes observed, which are 5-8cm beyond target).
+        OVERSHOOT_WEIGHT   = 60.0   # penalizes exceeding target+tolerance; does not affect being below it
+        OVERSHOOT_TOLERANCE = 0.015  # meters
+
         r_clearance = 0.0
-        if _REF_Q_FWD is not None and ref_idx is not None:
+        if _REF_Q_FWD is not None and ref_idx is not None and _REF_FOOT_HEIGHT_FWD is not None:
             expected_mask = _REF_MASK_FWD[ref_idx]  # 1=stance, 0=swing, per reference
+            ref_foot_h = _REF_FOOT_HEIGHT_FWD[ref_idx]  # (4,) real instantaneous target this frame
             for i in range(4):
                 if expected_mask[i] < 0.5 and contacts_now[i] < 0.5:
                     # reference expects swing AND foot is actually off the ground
-                    r_clearance += np.clip(foot_heights[i], 0, 0.16) * 3.0
+                    target = ref_foot_h[i]
+                    r_clearance += np.clip(foot_heights[i], 0, target) * 3.0
+                    overshoot = max(0.0, foot_heights[i] - target - OVERSHOOT_TOLERANCE)
+                    r_clearance += -OVERSHOOT_WEIGHT * overshoot**2
         else:
-            # no reference available -- fall back to the old unconditional
-            # behavior rather than giving zero clearance signal
+            # no reference available -- fall back to a reasonable flat value
+            # rather than giving zero clearance signal
             for i in range(4):
                 if contacts_now[i] < 0.5:
-                    r_clearance += np.clip(foot_heights[i], 0, 0.16) * 3.0
+                    target = 0.16
+                    r_clearance += np.clip(foot_heights[i], 0, target) * 3.0
+                    overshoot = max(0.0, foot_heights[i] - target - OVERSHOOT_TOLERANCE)
+                    r_clearance += -OVERSHOOT_WEIGHT * overshoot**2
+
+
 
         self._last_reward_components = {
             "r_upright": r_upright, "r_yaw": r_yaw, "r_height": r_height,
