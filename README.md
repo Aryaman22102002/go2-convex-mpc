@@ -234,12 +234,12 @@ Separately from the WBC extension above, this fork also includes an RL locomotio
 
 ### Demo
 
-<!-- Add the recorded demo video here, following the same convention as the WBC videos above:
-     1. Record a rollout of the final policy (e.g. via the MuJoCo passive viewer + a screen recorder).
-     2. Upload the clip as a GitHub issue/PR attachment to get a `user-attachments` URL.
-     3. Paste that URL below, replacing this comment. -->
 
-https://github.com/user-attachments/assets/PLACEHOLDER-ADD-RL-DEMO-VIDEO-URL-HERE
+https://github.com/user-attachments/assets/2dd171ef-fa9d-42f1-bf4a-58d1da77df9d
+
+
+
+
 
 ### Motivation
 
