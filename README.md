@@ -12,7 +12,7 @@ This fork extends the base controller with a **Whole-Body Control (WBC) QP** tha
 2. [Method](#method)
 3. [File Structure](#file-structure)
 4. [Results](#results)
-5. [RL Walking Gait (Imitation Learning + Terrain Curriculum)](#rl-walking-gait-imitation-learning--terrain-curriculum)
+5. [RL Walking Gait (Imitation Learning)](#rl-walking-gait-imitation-learning)
 6. [How to Run](#how-to-run)
 
 ---
@@ -226,48 +226,86 @@ At $\mu = 0.3$ the baseline slips and falls during forward trotting and rotation
 
 ---
 
-## RL Walking Gait (Imitation Learning + Terrain Curriculum)
+## RL Walking Gait (Imitation Learning)
 
-Separately from the WBC extension above, this fork also includes an RL locomotion policy for the Go2, trained via **behavior cloning (BC) pretraining followed by PPO fine-tuning**, with a **terrain curriculum** (flat -> slopes -> steps) layered on top. The goal is a learned policy that generalizes across uneven terrain, as a complement to the fully model-based MPC+WBC controller above.
+Separately from the WBC extension above, this fork also includes an RL locomotion policy for the Go2, trained via **behavior cloning (BC) pretraining followed by PPO fine-tuning** against trajectories recorded from the MPC+WBC controller above. This section documents the current, validated flat-ground result, the debugging process that got there, and what's next.
+
+### Demo
+
+<!-- Add the recorded demo video here, following the same convention as the WBC videos above:
+     1. Record a rollout of the final policy (e.g. via the MuJoCo passive viewer + a screen recorder).
+     2. Upload the clip as a GitHub issue/PR attachment to get a `user-attachments` URL.
+     3. Paste that URL below, replacing this comment. -->
+
+https://github.com/user-attachments/assets/PLACEHOLDER-ADD-RL-DEMO-VIDEO-URL-HERE
 
 ### Motivation
 
 Pure PPO with a hand-designed reward (upright, height, forward velocity, torque penalty) was tried first and repeatedly produced reward-hacked, non-gait behaviors (e.g. sliding along the ground) rather than a clean trot -- a well-known failure mode of reward engineering without a motion reference. The approach was switched to **imitation learning**: using trajectories recorded from the working MPC+WBC controller above as a reference signal for RL, rather than hand-crafting the gait from reward terms alone.
 
-### Method
+### Method (current architecture)
 
-**Reference data.** The MPC+WBC controller (already validated above) is run and logged at 200 Hz across gaits (forward trot, in-place trot), recording joint angles, joint velocities, base pose, and per-foot contact mask -- 2000 frames per gait.
+**Reference data.** The MPC+WBC controller is run and logged at 200 Hz (forward trot, in-place trot), recording joint angles, joint velocities, base pose/orientation, and per-foot contact mask -- 2000 frames per gait.
 
-**Imitation reward.** Rather than tracking a fixed, open-loop gait-phase clock (which was found to silently drift out of sync with the robot's real state within an episode), the reward matches the robot's current state to the closest reference frame via **nearest-neighbor lookup** over joint angles, joint velocities, and contact pattern jointly. Additional design points, found necessary through iteration:
-- **Contact-pattern gating**: contact-mask distance is weighted heavily in the match, since joint-angle similarity alone could match a reference frame with a completely different (and physically wrong) contact state.
-- **Rate-correct window constraint**: candidate matches are restricted to a small window around the *physically expected* next frame (accounting for the 200 Hz reference vs. 50 Hz control-loop rate), preventing the match from advancing through the gait cycle faster or slower than real elapsed time allows.
-- **Foot clearance reward**: an explicit swing-height term, calibrated against the reference's own recorded swing height (~0.13-0.16 m), since imitation-only matching under-rewarded actual foot lift.
-- **Yaw-stability penalty** and a **forward-velocity cap** (matching the reference's own recorded speed), to prevent the policy from drifting off-heading or outrunning the reference gait.
+**Deterministic reference clock + Reference State Initialization (RSI).** The imitation mechanism went through several iterations (see below) before converging on a standard DeepMimic-style design:
+- Each episode starts with the robot's **full physical state** (base position/orientation/velocity, joint angles/velocities) set directly from a random point in the recorded gait cycle, rather than always starting from a fixed standing pose.
+- The reference index driving imitation targets, foot-clearance targets, and the phase observation feature advances **deterministically** -- a fixed 4 frames per control step (200 Hz reference / 50 Hz control), with **no state-dependent correction**. This was a deliberate move away from an earlier adaptive nearest-neighbor matching scheme (see Debugging Journey) that turned out to create multiple feedback-loop bugs.
 
-**BC pretraining.** Reference (observation, action) pairs are reconstructed directly from the recorded trajectories (inverting the policy's joint-target scaling), and the PPO policy's own network is pretrained via supervised regression against them before any RL. This was necessary because RL-from-scratch under the imitation reward alone converged slowly and inconsistently; BC pretraining establishes the correct gait shape first, and PPO fine-tuning then corrects for closed-loop drift (compounding error from acting in the real simulator, which pure BC cannot correct for) and adds robustness.
+**Reward function**, per control step:
+- Imitation terms rewarding joint-angle and joint-velocity match against the reference at the current deterministic index.
+- An upright/height/torque/smoothness/lateral-velocity term set, plus a forward-velocity term capped at the reference's own recorded speed.
+- A **foot-clearance term** rewarding swing height up to the *real instantaneous reference foot height* at that exact point in the swing (precomputed via forward kinematics over the whole reference trajectory), with a one-sided penalty (plus a small tolerance band) for exceeding it -- this specifically closed an exploit where a flat, saturating height cap let a leg overshoot its natural swing height with no cost.
+- A **phase-conditioned contact-synchrony term** rewarding the real foot-contact pattern for matching the reference's own recorded pattern at the current deterministic index (not just "any valid trot pattern"), tightening true phase-locking between diagonal leg pairs.
+- A direct, non-circular penalty for any single foot remaining in the same contact state (on/off the ground) for longer than the reference's own typical duration, preventing degenerate "one leg permanently planted / one leg permanently airborne" solutions.
 
-**Terrain curriculum.** `Go2TerrainEnv` ramps terrain difficulty as a function of true cumulative training steps: flat-only initially, then a flat/slope/step mix with increasing severity (slopes up to 15 deg, steps up to 8 cm) at later stages. The step count driving this curriculum is threaded through `--resume` correctly (including across parallel environments) so progression is deliberate rather than accidentally resetting every training session.
+**BC pretraining.** Reference (observation, action) pairs are reconstructed directly from the recorded trajectories, and the PPO policy's network is pretrained via supervised regression against them before any RL -- necessary because RL-from-scratch under the imitation reward alone converged slowly and inconsistently. PPO fine-tuning then corrects for closed-loop drift that pure BC cannot address on its own.
+
+### Debugging journey
+
+Getting to a clean, reliable gait took a long sequence of hypothesis -> diagnose -> fix -> re-test cycles, several of which turned up genuine bugs rather than just needing more training:
+
+- **Silent observation/reward bug**: foot contact body names were misspelled in the code (`_foot_joint` vs. the model's actual `_foot`), silently zeroing out real contact information and a reward term for a long stretch of early training.
+- **Open-loop phase drift**: the original imitation mechanism used a gait-phase clock disconnected from the robot's real state, which drifted out of sync within an episode -- replaced with adaptive nearest-neighbor state matching, which fixed that but introduced new problems (a policy could satisfy contact-pattern matching while cycling its gait 4-7x faster than the reference's real cadence; a "permanently airborne leg / permanently planted leg" exploit made possible by a clearance reward that never actually penalized abandoning the gait cycle).
+- **Diagonal leg-pair asymmetry**: one diagonal pair reliably converged to a clean trot while the other never did, across many training runs. Ruled out physical/model asymmetry directly via MJCF inspection (masses, inertias, joint ranges confirmed symmetric). Traced (with outside review) to *spontaneous symmetry breaking*, reinforced by the adaptive matcher's dependence on the robot's own realized contacts -- a subtle feedback loop, not a physical bug. Tried mirror-augmented BC pretraining (verifying the correct joint-mirroring convention numerically via forward kinematics rather than assuming it); this measurably fixed the specific symmetry metric but was later found, via a proper 30-rollout comparison, to have regressed overall stability -- a real, informative negative result, not just a wrong guess.
+- **Structural rewrite**: given the adaptive matcher was the common thread behind several of the above issues, it was replaced entirely with the deterministic clock + RSI design described above. This resolved the diagonal asymmetry structurally and produced genuine forward locomotion (rather than a policy that survived by barely moving), though initial results were visually inconsistent ("dancing").
+- **Contaminated evaluation environment**: the base scene file turned out to have a permanent staircase geometry baked in, unrelated to and bypassing the terrain-curriculum system, at a location the robot would walk into partway through a rollout. Found by directly inspecting the model's geometry, confirmed to be a real confound (evaluating already-trained weights on a corrected scene improved measured performance substantially with zero retraining), and fixed by generating a clean flat-only scene file.
+- **Rear-leg overshoot -> yaw drift**: diagnostics showed rear legs swinging ~49-84% higher than front legs (the real reference gait itself has a natural, smaller ~22% asymmetry) and that this excess correlated strongly with real, accumulating yaw drift (not benign gait-cycle oscillation, confirmed by comparing net drift against local oscillation range). Root cause: the clearance reward saturated at a fixed height cap with no penalty for exceeding it. Fixed in two iterations -- an initial fix using a flat per-leg-group target overcorrected and made things worse (a flat target across the whole swing punishes the normal low-height portions of a real swing near liftoff/touchdown), refined into a fix using the *actual instantaneous reference foot height* as a one-sided target. This resolved the overshoot, the yaw drift, *and* general gait quality simultaneously.
+- **Phase-conditioned contact reward**: with the above fixed, tightened diagonal-pair synchronization further by replacing a phase-invariant sync reward (which accepted either diagonal contact pattern regardless of what the reference actually called for at that instant) with one matching the reference's real pattern at the current index.
+- **Statistically validated final check**: an initial small sample suggested a possible residual systematic yaw bias from foot-touchdown events. A properly powered follow-up (25 rollouts, event-level analysis, rollout-level bootstrapped confidence intervals, and a correlation test between cumulative touchdown impulse and actual net drift) showed the per-touchdown impulses are a normal, self-canceling feature of diagonal-pair trotting (opposite sign between diagonals, near-zero pooled mean, weak correlation with real drift) -- not a real defect, avoiding an unnecessary reward change that would likely have suppressed natural gait dynamics for no real benefit.
+
+### Results (current, validated)
+
+Evaluated over 30 rollouts (500 steps / 10 seconds each) on a genuinely flat scene:
+
+| Metric | Result |
+|---|---|
+| Survival (no fall) | **100%** (30/30) |
+| Forward speed | **0.71-0.74 m/s** |
+| Diagonal-pair contact sync (both pairs) | **70-96%** |
+| Front/rear swing-height ratio | ~12% (reference's own natural value: ~22%) |
+| Net yaw drift | Small residual in a minority of rollouts; confirmed statistically to not stem from a systematic touchdown-impulse bias |
+
+Visual inspection confirms a clean, confident trot with no falls, hesitation, or "dancing" across repeated rollouts.
+
+### Current status and next steps
+
+This result is for **flat ground only** -- multi-terrain locomotion (slopes, steps) was deliberately set aside partway through this process to focus on getting the core flat-ground gait fully reliable first, since early terrain attempts were built on top of a flat-ground policy that wasn't yet solid (and, as discovered later, an evaluation scene that wasn't even genuinely flat). With a validated, stable flat-ground result now in hand, the natural next step is to **resume the terrain curriculum** (`Go2TerrainEnv` already supports ramping slope/step difficulty as a function of training progress) on top of this policy, and re-run the same rigorous diagnostic process -- fall rate, gait symmetry, drift analysis -- specifically for slope and step terrain.
 
 ### File Structure (RL additions)
 
 ```
 go2-convex-mpc/
 ├── examples/
-│   ├── go2_terrain_env.py         # Gymnasium env: reward, curriculum, observation
-│   ├── train_ppo.py               # PPO training/resume entrypoint (SB3)
-│   ├── bc_pretrain.py             # Behavior-cloning pretraining on MPC reference data
-│   ├── collect_mpc_reference.py   # Records MPC+WBC trajectories for imitation reward
+│   ├── go2_terrain_env.py             # Gymnasium env: reward, RSI, deterministic clock, observation
+│   ├── train_ppo.py                   # PPO training/resume entrypoint (SB3), LR/entropy/gamma schedules
+│   ├── bc_pretrain.py                 # Behavior-cloning pretraining on MPC reference data (+ mirror augmentation)
+│   ├── collect_mpc_reference.py       # Records MPC+WBC trajectories for imitation reward
+│   ├── make_clean_flat_scene.py       # Strips unintended terrain geometry from the base scene file
 │   └── data/
-│       └── mpc_reference.npz      # Recorded reference trajectories (q, dq, base pose, contact mask, phase)
+│       └── mpc_reference.npz          # Recorded reference trajectories (q, dq, base pose, contact mask, phase)
+└── models/MJCF/go2/
+    └── scene_flat_clean.xml           # Genuinely flat scene used for all current training/evaluation
 ```
-
-### Results (current state)
-
-- **Flat ground**: stable across repeated rollouts (0% falls across multiple 500-step-episode test batches) following BC pretraining, with one diagonal leg pair (FR+RL) showing a consistent, clean trot signature.
-- **Known limitation -- leg asymmetry**: the other diagonal pair (FL+RR) is still stabilizing during training -- after a recent foot-clearance reward adjustment, one leg (RR) is currently lifting a bit higher than intended while its diagonal partner (RL) lifts less; leg masses, inertias, and joint ranges were checked directly against the MJCF and confirmed symmetric, so this is expected to even out with continued training rather than reflecting any underlying model issue.
-- **Terrain**: step terrain (up/down, several cm) is generally survived; slope terrain currently causes near-immediate falls and is the main open problem before this can be called reliable multi-terrain locomotion.
-
-
 
 ### Installation
 
