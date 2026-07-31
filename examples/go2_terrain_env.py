@@ -207,6 +207,16 @@ class Go2TerrainEnv(gym.Env):
         self.dt_ctrl      = 1.0 / ctrl_hz
         self.max_steps    = int(10.0 * ctrl_hz)  # 10 second episodes
 
+        # Terrain exposure tally (persists across episodes within this env
+        # instance's lifetime) -- per external review: episode COUNTS can be
+        # misleading if terrain types have very different typical episode
+        # lengths (e.g. a broken slope reset failing in 6 steps vs. a flat
+        # episode running the full 500), so this tracks actual environment
+        # STEPS experienced per terrain category, queried periodically during
+        # training via get_terrain_step_counts().
+        self._terrain_step_counts = {"flat": 0, "slope": 0, "step_up": 0, "step_down": 0}
+
+
         # Curriculum step counter. total_steps_ref is the starting offset
         # (the model's true cumulative trained steps at the time this env was
         # created -- previously always 0, even on --resume, so curriculum
@@ -352,6 +362,13 @@ class Go2TerrainEnv(gym.Env):
     # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
+    def get_terrain_step_counts(self):
+        """Returns this env instance's cumulative per-terrain-category step
+        tally. Queried by a training callback (via VecEnv.env_method) across
+        all parallel workers to report REAL environment-step exposure per
+        terrain type, not just episode counts."""
+        return dict(self._terrain_step_counts)
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         rng = np.random.default_rng(seed)
@@ -543,6 +560,16 @@ class Go2TerrainEnv(gym.Env):
         self._step_count  += 1
         self._total_steps += self._steps_per_tick
 
+        # Tally this step's terrain category for exposure instrumentation
+        if self._terrain_type == "flat":
+            self._terrain_step_counts["flat"] += self._steps_per_tick
+        elif self._terrain_type.startswith("slope"):
+            self._terrain_step_counts["slope"] += self._steps_per_tick
+        elif self._terrain_type.startswith("step_up"):
+            self._terrain_step_counts["step_up"] += self._steps_per_tick
+        elif self._terrain_type.startswith("step_down"):
+            self._terrain_step_counts["step_down"] += self._steps_per_tick
+
         obs     = self._get_obs()
         reward  = self._compute_reward(action, tau)
         terminated = self._is_terminated()
@@ -640,7 +667,23 @@ class Go2TerrainEnv(gym.Env):
         roll  = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
         pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1, 1))
         yaw   = np.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy**2 + qz**2))
-        r_upright = np.exp(-5.0 * (roll**2 + pitch**2))
+
+        # Terrain-relative correction for slope terrain (fix, per external
+        # review): world-frame roll/pitch and world-frame base height are
+        # fundamentally incompatible with a continuous slope. RSI correctly
+        # tilts the robot to align with the local slope at reset (verified
+        # <5mm residuals), but the OLD r_upright then immediately penalized
+        # that same correctly-tilted pose for not being world-level, and the
+        # OLD r_height pulled world qpos[2] toward a fixed 0.27 target
+        # regardless of how far up/down the slope the robot had walked --
+        # asking it to fight gravity/geometry continuously rather than just
+        # once at reset, unlike a discrete step. Both fixes are scaled by the
+        # actual slope angle (0 for flat/step terrain, where this reduces to
+        # the original formulas unchanged).
+        slope_rad = np.radians(self._current_slope_deg)
+        pitch_rel = pitch - slope_rad  # pitch relative to the local terrain normal
+
+        r_upright = np.exp(-5.0 * (roll**2 + pitch_rel**2))
 
         # Yaw stability -- penalize drift from initial heading (fix: policy was spiraling)
         yaw_err = np.arctan2(np.sin(yaw - self._init_yaw), np.cos(yaw - self._init_yaw))
@@ -651,8 +694,9 @@ class Go2TerrainEnv(gym.Env):
         # rather than something needing its own independent fix.
         r_yaw = -0.5 * yaw_err**2
 
-        # Height
-        height_err = d.qpos[2] - 0.27
+        # Height -- terrain-relative (see note above)
+        terrain_height_at_base = -d.qpos[0] * np.tan(slope_rad)
+        height_err = (d.qpos[2] - terrain_height_at_base) - 0.27
         r_height = np.exp(-10.0 * height_err**2)
 
         # Forward velocity -- capped at 0.6 m/s to match reference speed
@@ -867,16 +911,23 @@ class Go2TerrainEnv(gym.Env):
     # ------------------------------------------------------------------
     def _is_terminated(self):
         d = self.data
+        slope_rad = np.radians(self._current_slope_deg)
 
-        # Fallen (too low)
-        if d.qpos[2] < 0.15:
+        # Fallen (too low) -- terrain-relative, per external review: a
+        # world-frame height check would falsely trigger for a robot that's
+        # correctly walked partway down a slope (world qpos[2] legitimately
+        # decreases), or fail to trigger appropriately walking uphill.
+        terrain_height_at_base = -d.qpos[0] * np.tan(slope_rad)
+        if (d.qpos[2] - terrain_height_at_base) < 0.15:
             return True
 
-        # Extreme tilt
+        # Extreme tilt -- pitch adjusted for slope angle (roll unaffected,
+        # since slope terrain here is a pure Y-axis/pitch-plane tilt)
         qw, qx, qy, qz = d.qpos[3], d.qpos[4], d.qpos[5], d.qpos[6]
         roll  = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
         pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1, 1))
-        if abs(roll) > 0.8 or abs(pitch) > 0.8:
+        pitch_rel = pitch - slope_rad
+        if abs(roll) > 0.8 or abs(pitch_rel) > 0.8:
             return True
 
         return False
