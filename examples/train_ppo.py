@@ -59,6 +59,12 @@ def main():
                         help="Entropy coefficient decays linearly over THIS training call so "
                              "exploration tapers off once a good policy is found, instead of "
                              "continuing to churn a policy that already converged.")
+    parser.add_argument("--reset_optimizer", action="store_true",
+                        help="Reset the Adam optimizer state (moment estimates) on resume, "
+                             "discarding it from the loaded checkpoint. For the learning-dynamics "
+                             "control experiment: a resumed optimizer with very small accumulated "
+                             "moments can itself cause near-zero effective updates even with an "
+                             "active learning rate, per external review.")
     args = parser.parse_args()
 
     from stable_baselines3 import PPO
@@ -273,6 +279,66 @@ def main():
                 for f in feet:
                     self.logger.record(f"foot_stats/{c}_{f}_mean_swing_height", mean_heights[f])
 
+    class LearningDynamicsCallback(BaseCallback):
+        """Diagnoses whether PPO is actually updating the policy at all, per
+        external review. Near-zero approx_kl + zero clip_fraction + frozen
+        eval metrics over millions of steps is ambiguous on its own -- it
+        could mean genuine convergence, or it could mean training has
+        silently stalled (tiny effective LR, resumed optimizer state with
+        vanishingly small Adam updates, etc). The parameter-update norm ratio
+        ||theta_{t+1} - theta_t|| / ||theta_t|| is the most decisive single
+        metric: if this is ~0, the actor genuinely is not changing,
+        regardless of what the loss curves show. Also logs per-joint-class
+        (hip/thigh/calf) action std directly from the policy's log_std, since
+        decayed entropy coefficient doesn't necessarily mean zero real
+        exploration if the learned std remains substantial."""
+        def __init__(self, log_freq=50_000, verbose=0):
+            super().__init__(verbose)
+            self.log_freq = log_freq
+            self._last_logged = 0
+            self._prev_params = None
+
+        def _flat_params(self):
+            import torch
+            with torch.no_grad():
+                return torch.cat([p.detach().flatten().cpu()
+                                   for p in self.model.policy.parameters()])
+
+        def _on_step(self):
+            if self.num_timesteps - self._last_logged >= self.log_freq:
+                self._last_logged = self.num_timesteps
+                try:
+                    import torch
+                    current_params = self._flat_params()
+                    if self._prev_params is not None:
+                        delta_norm = torch.norm(current_params - self._prev_params).item()
+                        theta_norm = torch.norm(self._prev_params).item()
+                        ratio = delta_norm / max(theta_norm, 1e-12)
+                        print(f"[learning_dynamics @ {self.num_timesteps:,} steps] "
+                              f"||delta_theta||/||theta||={ratio:.3e}  "
+                              f"(over last {self.log_freq:,} steps)")
+                        self.logger.record("learning_dynamics/param_update_ratio", ratio)
+                        if ratio < 1e-5:
+                            print("  !! WARNING: parameter update ratio is essentially zero -- "
+                                  "the actor is not meaningfully changing, regardless of loss curves")
+                    self._prev_params = current_params
+
+                    # Per-joint-class action std, actuator order [hip,thigh,calf] x 4 legs
+                    log_std = self.model.policy.log_std.detach().cpu().numpy()
+                    std = np.exp(log_std)
+                    mean_hip   = float(np.mean(std[0::3]))
+                    mean_thigh = float(np.mean(std[1::3]))
+                    mean_calf  = float(np.mean(std[2::3]))
+                    print(f"  action std: hip={mean_hip:.4f}  thigh={mean_thigh:.4f}  "
+                          f"calf={mean_calf:.4f}  overall_mean={std.mean():.4f}")
+                    self.logger.record("learning_dynamics/action_std_hip", mean_hip)
+                    self.logger.record("learning_dynamics/action_std_thigh", mean_thigh)
+                    self.logger.record("learning_dynamics/action_std_calf", mean_calf)
+                    self.logger.record("learning_dynamics/action_std_overall", float(std.mean()))
+                except Exception as e:
+                    print(f"[learning_dynamics logging failed: {e}]")
+            return True
+
     set_random_seed(42)
 
     # ------------------------------------------------------------------
@@ -320,6 +386,16 @@ def main():
         model.lr_schedule = get_schedule_fn(lr_schedule_fn)
         model.gamma = args.gamma
         model.ent_coef = args.ent_coef_start
+
+        if args.reset_optimizer:
+            print("  --reset_optimizer set: reinitializing Adam optimizer state "
+                  "(discarding loaded moment estimates) for the learning-dynamics control test.")
+            model.policy.optimizer = model.policy.optimizer_class(
+                model.policy.parameters(),
+                lr=args.lr_start,
+                **model.policy.optimizer_kwargs,
+            )
+
         print(f"  Loaded. Overriding schedule: lr {args.lr_start:.1e}->{args.lr_end:.1e}, "
               f"gamma={args.gamma}, ent_coef {args.ent_coef_start}->{args.ent_coef_end}. "
               f"Continuing training for {args.steps:,} more steps.")
@@ -371,6 +447,7 @@ def main():
     terrain_exposure_cb = TerrainExposureCallback(log_freq=50_000)
     vel_match_monitor_cb = VelMatchMonitorCallback(log_freq=50_000)
     episode_outcome_cb = EpisodeOutcomeCallback(log_freq=100_000)
+    learning_dynamics_cb = LearningDynamicsCallback(log_freq=50_000)
 
     entropy_cb = EntropyDecayCallback(
         start=args.ent_coef_start,
@@ -381,7 +458,7 @@ def main():
     model.learn(
         total_timesteps = args.steps,
         callback        = [checkpoint_cb, eval_cb, entropy_cb, terrain_exposure_cb,
-                           vel_match_monitor_cb, episode_outcome_cb],
+                           vel_match_monitor_cb, episode_outcome_cb, learning_dynamics_cb],
         progress_bar    = True,
         reset_num_timesteps = (args.resume is None),  # don't reset counter on resume
     )
