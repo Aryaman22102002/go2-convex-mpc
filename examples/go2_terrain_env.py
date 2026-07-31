@@ -53,6 +53,9 @@ _REF_BASE_QUAT_FWD = None   # (2000, 4) base orientation, (x,y,z,w) order
 _REF_BASE_HEIGHT_FWD = None # (2000,) base z height
 _REF_LINVEL_FWD = None      # (2000, 3) base linear velocity, finite-differenced
 _REF_FOOT_HEIGHT_FWD = None # (2000, 4) real instantaneous foot heights [FL,FR,RL,RR], computed via forward kinematics -- see _ensure_ref_foot_heights()
+_REF_DQ_SIGMA = None        # (12,) per-joint reference velocity std, floored -- see _ensure_vel_normalization()
+VEL_MATCH_SIGMA_MIN = 1.5   # rad/s floor, per external review calibration
+VEL_MATCH_K = 0.50          # calibrated coefficient, per external review (targets median r_vel_match ~0.4-0.45)
 _REF_ANGVEL_FWD = None      # (2000, 3) base angular velocity, finite-differenced
 
 REF_HZ = 200.0
@@ -146,6 +149,25 @@ def _ensure_ref_foot_heights(model):
     _REF_FOOT_HEIGHT_FWD = heights
 
 
+def _ensure_vel_normalization():
+    """Precompute per-joint reference velocity standard deviation, with a
+    floor, for r_vel_match normalization. Fixes a dead reward: measured
+    empirically that r_vel_match was ~0 for 95.9% of steps during successful
+    flat-ground walking (raw squared error routinely 300+, while the old
+    exp(-0.1*S) coefficient only produces a non-negligible reward below
+    ~S=50) -- meaning this term contributed nothing throughout the whole
+    project. Per external review's calibration methodology: normalize each
+    joint's error by its own natural velocity scale (reference std, floored
+    at 1.5 rad/s to avoid over-weighting low-motion joints like hip
+    ab/adduction), then calibrate the coefficient from the observed median
+    normalized error to land in an actually-informative reward range."""
+    global _REF_DQ_SIGMA
+    if _REF_DQ_SIGMA is not None or _REF_DQ_FWD is None:
+        return
+    sigma = _REF_DQ_FWD.std(axis=0)
+    _REF_DQ_SIGMA = np.maximum(sigma, VEL_MATCH_SIGMA_MIN)
+
+
 # PD gains for joint position control
 KP = np.array([400.0, 400.0, 400.0,
                400.0, 400.0, 400.0,
@@ -216,6 +238,50 @@ class Go2TerrainEnv(gym.Env):
         # training via get_terrain_step_counts().
         self._terrain_step_counts = {"flat": 0, "slope": 0, "step_up": 0, "step_down": 0}
 
+        # Velocity-match monitoring accumulators (per external review request
+        # to track hip/thigh/calf error class contribution and winning-delta
+        # distribution during training, since this reward was newly
+        # activated after being effectively dead for the whole project)
+        self._vel_match_stats = {
+            "sum_hip": 0.0, "sum_thigh": 0.0, "sum_calf": 0.0,
+            "sum_r_vel_match": 0.0, "count": 0,
+            "delta_counts": {-1: 0, 0: 0, 1: 0},
+        }
+
+        # Comprehensive episode-outcome tracking, per terrain category, so
+        # future questions ("what's the fall rate on slopes specifically",
+        # "did roll or pitch cause more failures", "how does forward speed
+        # compare across terrain types", "is the front/rear foot-height
+        # ratio still healthy") can be answered from training logs directly,
+        # without needing a bespoke diagnostic script + a fresh training run
+        # every time a new question comes up.
+        def _new_terrain_bucket():
+            return {
+                "episodes": 0, "survived": 0,
+                "terminated_low_height": 0, "terminated_extreme_roll": 0,
+                "terminated_extreme_pitch": 0, "terminated_other": 0,
+                "sum_episode_length": 0, "sum_forward_distance": 0.0,
+                "sum_abs_yaw_drift": 0.0,
+            }
+        self._episode_outcome_stats = {
+            "flat": _new_terrain_bucket(), "slope": _new_terrain_bucket(),
+            "step_up": _new_terrain_bucket(), "step_down": _new_terrain_bucket(),
+        }
+        self._last_termination_reason = None
+
+        # Per-foot swing-height and diagonal-sync accumulators, per terrain
+        # category (directly monitors the front/rear overshoot and diagonal
+        # phase-locking issues found earlier in the project, on an ongoing
+        # basis rather than only when specifically investigated)
+        def _new_foot_bucket():
+            return {"sum_height": {"FL": 0.0, "FR": 0.0, "RL": 0.0, "RR": 0.0},
+                    "count_swing": {"FL": 0, "FR": 0, "RL": 0, "RR": 0},
+                    "sum_sync_match": 0.0, "count_sync": 0}
+        self._foot_stats = {
+            "flat": _new_foot_bucket(), "slope": _new_foot_bucket(),
+            "step_up": _new_foot_bucket(), "step_down": _new_foot_bucket(),
+        }
+
 
         # Curriculum step counter. total_steps_ref is the starting offset
         # (the model's true cumulative trained steps at the time this env was
@@ -242,6 +308,7 @@ class Go2TerrainEnv(gym.Env):
         self._data_flat  = mujoco.MjData(self._model_flat)
 
         _ensure_ref_foot_heights(self._model_flat)
+        _ensure_vel_normalization()
 
         self.n_joints = 12   # actuated joints
         self.n_obs    = 2 + 3 + 3 + 12 + 12 + 12 + 2 + 3 + 4 + 1  # = 54
@@ -368,6 +435,22 @@ class Go2TerrainEnv(gym.Env):
         all parallel workers to report REAL environment-step exposure per
         terrain type, not just episode counts."""
         return dict(self._terrain_step_counts)
+
+    def get_vel_match_stats(self):
+        """Returns this env instance's cumulative velocity-match monitoring
+        stats (per external review request, since this reward was newly
+        activated after being effectively dead throughout the project --
+        tracks hip/thigh/calf error class contribution and winning-delta
+        distribution so training can be audited for over-suppression of
+        hip motion or persistent one-sided phase offset)."""
+        return {
+            "sum_hip": self._vel_match_stats["sum_hip"],
+            "sum_thigh": self._vel_match_stats["sum_thigh"],
+            "sum_calf": self._vel_match_stats["sum_calf"],
+            "sum_r_vel_match": self._vel_match_stats["sum_r_vel_match"],
+            "count": self._vel_match_stats["count"],
+            "delta_counts": dict(self._vel_match_stats["delta_counts"]),
+        }
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -561,14 +644,7 @@ class Go2TerrainEnv(gym.Env):
         self._total_steps += self._steps_per_tick
 
         # Tally this step's terrain category for exposure instrumentation
-        if self._terrain_type == "flat":
-            self._terrain_step_counts["flat"] += self._steps_per_tick
-        elif self._terrain_type.startswith("slope"):
-            self._terrain_step_counts["slope"] += self._steps_per_tick
-        elif self._terrain_type.startswith("step_up"):
-            self._terrain_step_counts["step_up"] += self._steps_per_tick
-        elif self._terrain_type.startswith("step_down"):
-            self._terrain_step_counts["step_down"] += self._steps_per_tick
+        self._terrain_step_counts[self._terrain_category()] += self._steps_per_tick
 
         obs     = self._get_obs()
         reward  = self._compute_reward(action, tau)
@@ -585,8 +661,62 @@ class Go2TerrainEnv(gym.Env):
                 "l": self._step_count,
                 "terrain": self._terrain_type,
             }
+            self._record_episode_outcome(terminated, truncated)
 
         return obs, reward, terminated, truncated, info
+
+    def _terrain_category(self):
+        """Maps self._terrain_type (e.g. 'slope_10.7deg') to one of the
+        four bucket keys used for all per-terrain accumulators."""
+        if self._terrain_type == "flat":
+            return "flat"
+        elif self._terrain_type.startswith("slope"):
+            return "slope"
+        elif self._terrain_type.startswith("step_up"):
+            return "step_up"
+        elif self._terrain_type.startswith("step_down"):
+            return "step_down"
+        return "flat"  # fallback, shouldn't normally happen
+
+    def _record_episode_outcome(self, terminated, truncated):
+        cat = self._terrain_category()
+        bucket = self._episode_outcome_stats[cat]
+        bucket["episodes"] += 1
+        bucket["sum_episode_length"] += self._step_count
+
+        d = self.data
+        bucket["sum_forward_distance"] += float(d.qpos[0])
+
+        qw, qx, qy, qz = d.qpos[3], d.qpos[4], d.qpos[5], d.qpos[6]
+        yaw = np.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy**2 + qz**2))
+        yaw_err = np.arctan2(np.sin(yaw - self._init_yaw), np.cos(yaw - self._init_yaw))
+        bucket["sum_abs_yaw_drift"] += abs(float(yaw_err))
+
+        if truncated and not terminated:
+            bucket["survived"] += 1
+        elif self._last_termination_reason == "low_height":
+            bucket["terminated_low_height"] += 1
+        elif self._last_termination_reason == "extreme_roll":
+            bucket["terminated_extreme_roll"] += 1
+        elif self._last_termination_reason == "extreme_pitch":
+            bucket["terminated_extreme_pitch"] += 1
+        else:
+            bucket["terminated_other"] += 1
+
+    def get_episode_outcome_stats(self):
+        """Returns cumulative per-terrain-category episode outcome stats
+        (survival rate, termination reason breakdown, mean length/distance/
+        yaw drift). Queried by a training callback across all parallel
+        workers."""
+        import copy
+        return copy.deepcopy(self._episode_outcome_stats)
+
+    def get_foot_stats(self):
+        """Returns cumulative per-terrain-category foot swing-height and
+        diagonal-sync stats. Queried by a training callback across all
+        parallel workers."""
+        import copy
+        return copy.deepcopy(self._foot_stats)
 
     # ------------------------------------------------------------------
     # Observation
@@ -733,6 +863,17 @@ class Go2TerrainEnv(gym.Env):
         # phase-conditioned against the actual expected contact pattern, not
         # just "any valid trot pattern" -- see note there)
 
+        # Accumulate per-foot swing-height stats for ongoing monitoring
+        # (directly tracks the front/rear overshoot issue found earlier in
+        # the project, on a continuous basis)
+        foot_stat_names = ["FL", "FR", "RL", "RR"]
+        cat = self._terrain_category()
+        fstats = self._foot_stats[cat]
+        for i, fname in enumerate(foot_stat_names):
+            if contacts_now[i] < 0.5:  # swinging
+                fstats["sum_height"][fname] += float(foot_heights[i])
+                fstats["count_swing"][fname] += 1
+
         # Stuck-leg penalty (fix: both the clearance-gate and r_sync above
         # turned out to be defeatable -- the clearance gate was circular
         # (the reference match is partly CHOSEN to agree with real contacts,
@@ -782,6 +923,10 @@ class Go2TerrainEnv(gym.Env):
         # all. This is the standard DeepMimic-style design.
         r_imitate = 0.0
         r_vel_match = 0.0
+        vel_match_winning_delta = 0
+        vel_match_E_hip = 0.0
+        vel_match_E_thigh = 0.0
+        vel_match_E_calf = 0.0
         ref_idx = self._last_ref_idx
         if _REF_Q_FWD is not None and ref_idx is not None:
             q_now  = d.qpos[7:19][JOINT_REORDER]
@@ -793,8 +938,56 @@ class Go2TerrainEnv(gym.Env):
             joint_err = np.sum((q_now - ref_q)**2)
             r_imitate = np.exp(-2.0 * joint_err)
 
-            vel_err = np.sum((dq_now - ref_dq)**2)
-            r_vel_match = np.exp(-0.1 * vel_err)
+            # r_vel_match -- FIXED (previously dead: measured ~0 for 95.9% of
+            # steps during successful flat walking, since raw squared error
+            # routinely exceeded 300 while the old exp(-0.1*S) coefficient
+            # only gave non-negligible reward below ~S=50). Per external
+            # review's calibrated methodology:
+            #  - normalize each joint's error by its own natural reference
+            #    velocity scale (std, floored at 1.5 rad/s) rather than
+            #    summing raw squared error across joints of very different
+            #    natural speed;
+            #  - use a phase-tolerant minimum over the matched reference
+            #    index +-1 frame, since empirically the exact deterministic
+            #    index was the best match only 9.7% of the time (delta=-1/+1
+            #    combined won 90.3%), meaning the strict version was
+            #    punishing harmless one-step phase noise almost always;
+            #  - calibrate the coefficient (0.50) from the observed median
+            #    normalized error so the reward is neither saturated at 0
+            #    nor pinned at 1, landing in the same informative range as
+            #    r_imitate.
+            # This tolerance is intentionally isolated to r_vel_match only --
+            # it does NOT alter the observation phase, position imitation
+            # target, contact mask, foot-height target, or deterministic
+            # clock, so it cannot become another adaptive-matcher feedback
+            # loop like the one this whole architecture replaced.
+            if _REF_DQ_SIGMA is not None:
+                n_ref = _REF_DQ_FWD.shape[0]
+                best_E = None
+                for delta in (-1, 0, 1):
+                    idx = (ref_idx + delta) % n_ref
+                    diff = dq_now - _REF_DQ_FWD[idx]
+                    E = np.mean((diff / _REF_DQ_SIGMA) ** 2)
+                    if best_E is None or E < best_E:
+                        best_E = E
+                        vel_match_winning_delta = delta
+                        best_diff_sq = (diff / _REF_DQ_SIGMA) ** 2
+                r_vel_match = np.exp(-VEL_MATCH_K * best_E)
+                # Per-joint-class breakdown for training-time monitoring
+                # (actuator order: [hip,thigh,calf] x [FR,FL,RR,RL])
+                vel_match_E_hip   = float(np.mean(best_diff_sq[0::3]))
+                vel_match_E_thigh = float(np.mean(best_diff_sq[1::3]))
+                vel_match_E_calf  = float(np.mean(best_diff_sq[2::3]))
+
+                self._vel_match_stats["sum_hip"]   += vel_match_E_hip
+                self._vel_match_stats["sum_thigh"] += vel_match_E_thigh
+                self._vel_match_stats["sum_calf"]  += vel_match_E_calf
+                self._vel_match_stats["sum_r_vel_match"] += r_vel_match
+                self._vel_match_stats["count"] += 1
+                self._vel_match_stats["delta_counts"][vel_match_winning_delta] += 1
+            else:
+                vel_err = np.sum((dq_now - ref_dq)**2)
+                r_vel_match = np.exp(-0.1 * vel_err)
 
         # Foot clearance (fix: measured actual swing height on v10 was only
         # ~0.06-0.09m vs. the reference's own ~0.13-0.16m, so this weight was
@@ -883,6 +1076,11 @@ class Go2TerrainEnv(gym.Env):
             ref_mask_now = _REF_MASK_FWD[ref_idx]  # [FL,FR,RL,RR], 1=stance, 0=swing
             hamming_dist = np.sum(np.abs(contacts_now - ref_mask_now))
             r_sync = 1.0 - 0.25 * hamming_dist  # 1.0 if exactly matching the expected pattern
+
+            # Accumulate sync-match stats for ongoing monitoring (r_sync
+            # itself, rescaled 0-1, serves directly as the match fraction)
+            fstats["sum_sync_match"] += float(r_sync)
+            fstats["count_sync"] += 1
         else:
             # no reference available -- fall back to the old phase-invariant
             # version rather than giving zero signal
@@ -898,6 +1096,10 @@ class Go2TerrainEnv(gym.Env):
             "r_smooth": r_smooth, "r_clearance": r_clearance,
             "r_imitate": r_imitate, "r_vel_match": r_vel_match, "r_sync": r_sync,
             "r_stuck_leg": r_stuck_leg,
+            "vel_match_winning_delta": vel_match_winning_delta,
+            "vel_match_E_hip": vel_match_E_hip,
+            "vel_match_E_thigh": vel_match_E_thigh,
+            "vel_match_E_calf": vel_match_E_calf,
             "contacts_now": contacts_now.copy(),
             "ref_mask": (_REF_MASK_FWD[ref_idx].copy() if _REF_Q_FWD is not None else None),
         }
@@ -912,6 +1114,7 @@ class Go2TerrainEnv(gym.Env):
     def _is_terminated(self):
         d = self.data
         slope_rad = np.radians(self._current_slope_deg)
+        self._last_termination_reason = None
 
         # Fallen (too low) -- terrain-relative, per external review: a
         # world-frame height check would falsely trigger for a robot that's
@@ -919,6 +1122,7 @@ class Go2TerrainEnv(gym.Env):
         # decreases), or fail to trigger appropriately walking uphill.
         terrain_height_at_base = -d.qpos[0] * np.tan(slope_rad)
         if (d.qpos[2] - terrain_height_at_base) < 0.15:
+            self._last_termination_reason = "low_height"
             return True
 
         # Extreme tilt -- pitch adjusted for slope angle (roll unaffected,
@@ -927,7 +1131,11 @@ class Go2TerrainEnv(gym.Env):
         roll  = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
         pitch = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1, 1))
         pitch_rel = pitch - slope_rad
-        if abs(roll) > 0.8 or abs(pitch_rel) > 0.8:
+        if abs(roll) > 0.8:
+            self._last_termination_reason = "extreme_roll"
+            return True
+        if abs(pitch_rel) > 0.8:
+            self._last_termination_reason = "extreme_pitch"
             return True
 
         return False

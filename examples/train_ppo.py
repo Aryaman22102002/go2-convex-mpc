@@ -90,6 +90,189 @@ def main():
             self.model.ent_coef = self.start + (self.end - self.start) * progress
             return True
 
+    class TerrainExposureCallback(BaseCallback):
+        """Periodically queries actual environment-step exposure per terrain
+        category across all parallel workers (not just episode counts, which
+        can be misleading if terrain types have very different typical
+        episode lengths -- e.g. a broken slope reset failing in 6 steps vs.
+        a flat episode running the full 500, meaning episode counts could
+        look balanced while real training signal was almost entirely from
+        one terrain type). Logs both to console and tensorboard."""
+        def __init__(self, log_freq=50_000, verbose=0):
+            super().__init__(verbose)
+            self.log_freq = log_freq
+            self._last_logged = 0
+
+        def _on_step(self):
+            if self.num_timesteps - self._last_logged >= self.log_freq:
+                self._last_logged = self.num_timesteps
+                try:
+                    per_env_counts = self.training_env.env_method("get_terrain_step_counts")
+                    totals = {"flat": 0, "slope": 0, "step_up": 0, "step_down": 0}
+                    for counts in per_env_counts:
+                        for k, v in counts.items():
+                            totals[k] += v
+                    grand_total = sum(totals.values())
+                    if grand_total > 0:
+                        print(f"[terrain exposure @ {self.num_timesteps:,} steps] " +
+                              ", ".join(f"{k}={v:,} ({100*v/grand_total:.1f}%)"
+                                        for k, v in totals.items()))
+                        for k, v in totals.items():
+                            self.logger.record(f"terrain_exposure/{k}_steps", v)
+                            self.logger.record(f"terrain_exposure/{k}_pct", 100*v/grand_total)
+                except Exception as e:
+                    print(f"[terrain exposure logging failed: {e}]")
+            return True
+
+    class VelMatchMonitorCallback(BaseCallback):
+        """Periodically queries hip/thigh/calf velocity-error class
+        contribution and winning-delta distribution across all parallel
+        workers. Per external review: r_vel_match was newly activated after
+        being effectively dead throughout the project (measured ~0 reward
+        for 95.9% of steps during successful flat walking under the old
+        uncalibrated coefficient). This monitors whether training suppresses
+        useful hip stabilization motion (watch sum_hip relative to
+        sum_thigh/sum_calf) or develops a persistent one-sided phase offset
+        (watch delta_counts -- a healthy run should stay roughly balanced
+        between -1/+1, not drift toward one side dominating)."""
+        def __init__(self, log_freq=50_000, verbose=0):
+            super().__init__(verbose)
+            self.log_freq = log_freq
+            self._last_logged = 0
+
+        def _on_step(self):
+            if self.num_timesteps - self._last_logged >= self.log_freq:
+                self._last_logged = self.num_timesteps
+                try:
+                    per_env_stats = self.training_env.env_method("get_vel_match_stats")
+                    total_hip = sum(s["sum_hip"] for s in per_env_stats)
+                    total_thigh = sum(s["sum_thigh"] for s in per_env_stats)
+                    total_calf = sum(s["sum_calf"] for s in per_env_stats)
+                    total_r = sum(s["sum_r_vel_match"] for s in per_env_stats)
+                    total_count = sum(s["count"] for s in per_env_stats)
+                    delta_totals = {-1: 0, 0: 0, 1: 0}
+                    for s in per_env_stats:
+                        for d, c in s["delta_counts"].items():
+                            delta_totals[d] += c
+                    delta_grand_total = sum(delta_totals.values())
+                    if total_count > 0:
+                        mean_hip = total_hip / total_count
+                        mean_thigh = total_thigh / total_count
+                        mean_calf = total_calf / total_count
+                        mean_r = total_r / total_count
+                        print(f"[vel_match @ {self.num_timesteps:,} steps] "
+                              f"mean_r_vel_match={mean_r:.4f}  "
+                              f"E_hip={mean_hip:.3f}  E_thigh={mean_thigh:.3f}  E_calf={mean_calf:.3f}")
+                        self.logger.record("vel_match/mean_r_vel_match", mean_r)
+                        self.logger.record("vel_match/E_hip", mean_hip)
+                        self.logger.record("vel_match/E_thigh", mean_thigh)
+                        self.logger.record("vel_match/E_calf", mean_calf)
+                        if delta_grand_total > 0:
+                            pct = {d: 100*c/delta_grand_total for d, c in delta_totals.items()}
+                            print(f"  winning delta distribution: "
+                                  f"-1={pct[-1]:.1f}%  0={pct[0]:.1f}%  +1={pct[1]:.1f}%")
+                            for d in (-1, 0, 1):
+                                self.logger.record(f"vel_match/delta_{d}_pct", pct[d])
+                except Exception as e:
+                    print(f"[vel_match logging failed: {e}]")
+            return True
+
+    class EpisodeOutcomeCallback(BaseCallback):
+        """Periodically queries comprehensive per-terrain-category episode
+        outcome stats (survival rate, termination reason breakdown, mean
+        episode length/forward distance/yaw drift) and per-foot swing-height
+        + diagonal-sync stats, across all parallel workers. Logs everything
+        to console and tensorboard so future questions about training
+        behavior can be answered directly from these logs, rather than
+        needing a bespoke diagnostic script plus another training run."""
+        def __init__(self, log_freq=100_000, verbose=0):
+            super().__init__(verbose)
+            self.log_freq = log_freq
+            self._last_logged = 0
+
+        def _on_step(self):
+            if self.num_timesteps - self._last_logged >= self.log_freq:
+                self._last_logged = self.num_timesteps
+                try:
+                    self._log_episode_outcomes()
+                    self._log_foot_stats()
+                except Exception as e:
+                    print(f"[episode outcome logging failed: {e}]")
+            return True
+
+        def _log_episode_outcomes(self):
+            per_env = self.training_env.env_method("get_episode_outcome_stats")
+            cats = ["flat", "slope", "step_up", "step_down"]
+            totals = {c: {"episodes": 0, "survived": 0,
+                          "terminated_low_height": 0, "terminated_extreme_roll": 0,
+                          "terminated_extreme_pitch": 0, "terminated_other": 0,
+                          "sum_episode_length": 0, "sum_forward_distance": 0.0,
+                          "sum_abs_yaw_drift": 0.0} for c in cats}
+            for env_stats in per_env:
+                for c in cats:
+                    for k, v in env_stats[c].items():
+                        totals[c][k] += v
+
+            print(f"\n[episode outcomes @ {self.num_timesteps:,} steps]")
+            for c in cats:
+                t = totals[c]
+                n = t["episodes"]
+                if n == 0:
+                    continue
+                survival_pct = 100 * t["survived"] / n
+                mean_len = t["sum_episode_length"] / n
+                mean_dist = t["sum_forward_distance"] / n
+                mean_yaw = np.degrees(t["sum_abs_yaw_drift"] / n)
+                print(f"  {c:10s} n={n:5d}  survival={survival_pct:5.1f}%  "
+                      f"mean_len={mean_len:6.1f}  mean_dist={mean_dist:+6.3f}m  "
+                      f"mean_|yaw_drift|={mean_yaw:5.1f}deg")
+                print(f"             termination breakdown: "
+                      f"low_height={100*t['terminated_low_height']/n:.1f}%  "
+                      f"extreme_roll={100*t['terminated_extreme_roll']/n:.1f}%  "
+                      f"extreme_pitch={100*t['terminated_extreme_pitch']/n:.1f}%  "
+                      f"other={100*t['terminated_other']/n:.1f}%")
+                self.logger.record(f"episode_outcome/{c}_survival_pct", survival_pct)
+                self.logger.record(f"episode_outcome/{c}_mean_length", mean_len)
+                self.logger.record(f"episode_outcome/{c}_mean_forward_dist", mean_dist)
+                self.logger.record(f"episode_outcome/{c}_mean_abs_yaw_drift_deg", mean_yaw)
+                for reason in ("terminated_low_height", "terminated_extreme_roll",
+                               "terminated_extreme_pitch", "terminated_other"):
+                    self.logger.record(f"episode_outcome/{c}_{reason}_pct", 100*t[reason]/n)
+
+        def _log_foot_stats(self):
+            per_env = self.training_env.env_method("get_foot_stats")
+            cats = ["flat", "slope", "step_up", "step_down"]
+            feet = ["FL", "FR", "RL", "RR"]
+            totals = {c: {"sum_height": {f: 0.0 for f in feet},
+                          "count_swing": {f: 0 for f in feet},
+                          "sum_sync_match": 0.0, "count_sync": 0} for c in cats}
+            for env_stats in per_env:
+                for c in cats:
+                    for f in feet:
+                        totals[c]["sum_height"][f] += env_stats[c]["sum_height"][f]
+                        totals[c]["count_swing"][f] += env_stats[c]["count_swing"][f]
+                    totals[c]["sum_sync_match"] += env_stats[c]["sum_sync_match"]
+                    totals[c]["count_sync"] += env_stats[c]["count_sync"]
+
+            for c in cats:
+                t = totals[c]
+                if t["count_sync"] == 0:
+                    continue
+                mean_heights = {f: (t["sum_height"][f] / t["count_swing"][f]
+                                     if t["count_swing"][f] > 0 else 0.0) for f in feet}
+                front_mean = (mean_heights["FL"] + mean_heights["FR"]) / 2
+                rear_mean  = (mean_heights["RL"] + mean_heights["RR"]) / 2
+                ratio_pct = (100 * (rear_mean / front_mean - 1)) if front_mean > 1e-6 else 0.0
+                mean_sync = 100 * t["sum_sync_match"] / t["count_sync"]
+                print(f"  {c:10s} swing heights FL={mean_heights['FL']:.3f} "
+                      f"FR={mean_heights['FR']:.3f} RL={mean_heights['RL']:.3f} "
+                      f"RR={mean_heights['RR']:.3f}  rear/front={ratio_pct:+.1f}%  "
+                      f"sync_match={mean_sync:.1f}%")
+                self.logger.record(f"foot_stats/{c}_rear_front_ratio_pct", ratio_pct)
+                self.logger.record(f"foot_stats/{c}_sync_match_pct", mean_sync)
+                for f in feet:
+                    self.logger.record(f"foot_stats/{c}_{f}_mean_swing_height", mean_heights[f])
+
     set_random_seed(42)
 
     # ------------------------------------------------------------------
@@ -185,6 +368,9 @@ def main():
         deterministic        = True,
         verbose              = 1,
     )
+    terrain_exposure_cb = TerrainExposureCallback(log_freq=50_000)
+    vel_match_monitor_cb = VelMatchMonitorCallback(log_freq=50_000)
+    episode_outcome_cb = EpisodeOutcomeCallback(log_freq=100_000)
 
     entropy_cb = EntropyDecayCallback(
         start=args.ent_coef_start,
@@ -194,7 +380,8 @@ def main():
 
     model.learn(
         total_timesteps = args.steps,
-        callback        = [checkpoint_cb, eval_cb, entropy_cb],
+        callback        = [checkpoint_cb, eval_cb, entropy_cb, terrain_exposure_cb,
+                           vel_match_monitor_cb, episode_outcome_cb],
         progress_bar    = True,
         reset_num_timesteps = (args.resume is None),  # don't reset counter on resume
     )
