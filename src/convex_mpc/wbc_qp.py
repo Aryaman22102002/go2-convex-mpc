@@ -169,7 +169,7 @@ def solve_wbc(go2, contact_mask, mpc_forces, slope_deg=0.0):
         verbose=False,
         eps_abs=1e-4,
         eps_rel=1e-4,
-        max_iter=2000,
+        max_iter=300,   # lowered from 2000, same rationale as centroidal_mpc.py
         polish=True,
     )
     res = prob.solve()

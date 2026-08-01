@@ -34,7 +34,14 @@ OPTS = {
     "osqp": {
         "eps_abs": 1e-4,
         "eps_rel": 1e-4,
-        "max_iter": 1000,
+        "max_iter": 200,   # lowered from 1000 (fix, per parallelism-throughput
+                            # investigation): bounds worst-case per-step solve
+                            # latency directly. A hard/near-infeasible problem
+                            # grinding for many iterations before giving up
+                            # disproportionately drags down SYNCHRONOUS parallel
+                            # throughput (every worker waits for the slowest one
+                            # each step), even though it barely affects average
+                            # solve time for normal, easily-solved steps.
         "polish": False,
         "verbose": False,
         'adaptive_rho': True,
