@@ -52,6 +52,7 @@ class LegController():
 
     def __init__(self):
         self.last_mask = np.array([2, 2, 2, 2])
+        self.last_wbc_success = True
 
     # ------------------------------------------------------------------
     # Solve WBC once for all legs, return all outputs
@@ -63,11 +64,16 @@ class LegController():
         mpc_forces_world: np.ndarray,   # shape (12,): [FL, FR, RL, RR] x [fx,fy,fz]
         current_time: float,
         use_wbc: bool = True,
+        slope_deg: float = 0.0,
     ) -> dict:
         """
         Compute torques for all four legs.
         Stance legs: solved via WBC QP (if use_wbc=True) or naive JᵀF.
         Swing legs:  impedance controller (unchanged).
+
+        slope_deg: known local terrain slope (deg), passed through to the
+        WBC's terrain-relative friction cone. Defaults to 0.0 (identical to
+        the original flat-ground-only behavior).
 
         Returns dict: leg_name -> LegOutput
         """
@@ -85,14 +91,16 @@ class LegController():
         self.wbc_solve_time_ms = 0.0
         if use_wbc:
             t0 = time.perf_counter()
-            wbc_tau, wbc_f, wbc_ok = solve_wbc(go2, current_mask, mpc_force_dict)
+            wbc_tau, wbc_f, wbc_ok = solve_wbc(go2, current_mask, mpc_force_dict, slope_deg=slope_deg)
             self.wbc_solve_time_ms = (time.perf_counter() - t0) * 1e3
+            self.last_wbc_success = wbc_ok  # exposed for callers (e.g. residual RL env)
             if not wbc_ok:
                 print(f"[LEG] WBC fallback at t={current_time:.3f}s  mask={current_mask}")
         else:
             wbc_tau = None
             wbc_f   = mpc_force_dict
             wbc_ok  = False
+            self.last_wbc_success = False
 
         outputs = {}
         for leg in LEG_NAMES:
@@ -173,6 +181,7 @@ class LegController():
                 # Use WBC solution
                 tau_cmd = wbc_tau[leg]
                 f_used  = wbc_f[leg]
+                setattr(self, f"_last_f_{leg}", f_used.copy())
             else:
                 # Fallback: naive JᵀF
                 tau_cmd = J_foot_world.T @ -contact_force

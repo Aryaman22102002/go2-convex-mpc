@@ -29,10 +29,18 @@ LEG_NAMES = ["FL", "FR", "RL", "RR"]
 LEG_INDEX = {"FL": 0, "FR": 1, "RL": 2, "RR": 3}
 
 
-def solve_wbc(go2, contact_mask, mpc_forces):
+def solve_wbc(go2, contact_mask, mpc_forces, slope_deg=0.0):
     """
     Solve the WBC QP for all stance legs simultaneously.
 
+    slope_deg: known local terrain slope (deg). Defaults to 0.0 (identical
+    to the original flat-ground-only behavior). Used to express the
+    friction cone relative to the LOCAL contact normal rather than raw
+    world axes -- on a tilted surface, the true contact normal is not
+    world-z, so a cone built from raw fx/fy/fz assumes a physically wrong
+    normal direction and can produce an infeasible or overly conservative
+    QP (consistent with the '[WBC] QP failed: maximum iterations reached'
+    messages observed during slope testing).
     Parameters
     ----------
     go2          : PinGo2Model (already updated this tick via update_model)
@@ -100,23 +108,38 @@ def solve_wbc(go2, contact_mask, mpc_forces):
     b_eq            = h_joints
 
     # ------------------------------------------------------------------
-    # Friction pyramid: linearized friction cone per stance foot.
+    # Friction pyramid: linearized friction cone per stance foot, now
+    # expressed relative to the LOCAL contact normal/tangent directions
+    # rather than raw world fx/fy/fz (fix, per external comparison against
+    # the RL policy -- see solve_wbc docstring). For a slope pivoting
+    # through the world origin about the Y axis (matching the convention
+    # used elsewhere in this project): local normal n=(sin(slope),0,cos(slope)),
+    # tangents t1=(cos(slope),0,-sin(slope)) and t2=(0,1,0). At slope_deg=0
+    # this reduces exactly to the original world-axis-aligned formula.
     # MU_SAFE < MU gives a small safety margin so the solution stays
     # strictly inside the cone despite solver tolerance.
-    # Row 5 enforces fz >= FZ_MIN to prevent degenerate zero-force solutions.
+    # Row 5 enforces f.n >= FZ_MIN to prevent degenerate zero-force solutions.
     # ------------------------------------------------------------------
+    slope_rad = np.radians(slope_deg)
+    s, c = np.sin(slope_rad), np.cos(slope_rad)
+
     n_cone = 5 * n_s
     A_cone = np.zeros((n_cone, n_z))
     u_cone = np.zeros(n_cone)
 
     for k in range(n_s):
         r = 5 * k
-        c = i_f + 3 * k
-        A_cone[r+0, c:c+3] = [ 1,  0, -MU_SAFE]
-        A_cone[r+1, c:c+3] = [-1,  0, -MU_SAFE]
-        A_cone[r+2, c:c+3] = [ 0,  1, -MU_SAFE]
-        A_cone[r+3, c:c+3] = [ 0, -1, -MU_SAFE]
-        A_cone[r+4, c:c+3] = [ 0,  0, -1      ]
+        col = i_f + 3 * k
+        # +t1 - MU_SAFE*n <= 0
+        A_cone[r+0, col:col+3] = [ c - MU_SAFE*s, 0,  -s - MU_SAFE*c]
+        # -t1 - MU_SAFE*n <= 0
+        A_cone[r+1, col:col+3] = [-c - MU_SAFE*s, 0,   s - MU_SAFE*c]
+        # +t2 - MU_SAFE*n <= 0
+        A_cone[r+2, col:col+3] = [-MU_SAFE*s,     1,  -MU_SAFE*c]
+        # -t2 - MU_SAFE*n <= 0
+        A_cone[r+3, col:col+3] = [-MU_SAFE*s,    -1,  -MU_SAFE*c]
+        # -(f.n) <= -FZ_MIN  (i.e. f.n >= FZ_MIN)
+        A_cone[r+4, col:col+3] = [-s, 0, -c]
         u_cone[r+4] = -FZ_MIN
 
     # ------------------------------------------------------------------

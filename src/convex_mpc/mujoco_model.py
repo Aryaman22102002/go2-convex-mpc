@@ -14,10 +14,29 @@ import pinocchio as pin
 REPO = Path(__file__).resolve().parents[2]
 XML_PATH = REPO / "models" / "MJCF" / "go2" / "scene.xml"
 
+# Module-level cache: xml_path -> loaded MjModel. Fix for a recurring
+# resource-exhaustion bug: mj.MjModel.from_xml_path() appears to have some
+# internal ceiling on repeated calls within one process, regardless of
+# whether the file is newly created or already-existing/reused. Standard
+# MuJoCo usage loads a model ONCE and creates fresh MjData per episode
+# (cheap, doesn't touch the resource-loading path) -- our previous design
+# called from_xml_path fresh on every single episode reset, which is both
+# wasteful and the actual root cause of this bug (confirmed: it persisted
+# even after eliminating temp-file churn/accumulation via a pre-generated,
+# reused terrain library -- so the count of from_xml_path calls itself,
+# not file creation/deletion, is the trigger).
+_MODEL_CACHE = {}
+
+
 class MuJoCo_GO2_Model:
-    def __init__(self):
-        # Load the MuJoCo model
-        self.model = mj.MjModel.from_xml_path(str(XML_PATH))
+    def __init__(self, xml_path=None):
+        # Allow overriding the default flat scene.xml, e.g. to test slope/step
+        # terrain variants, without touching any existing scripts that rely
+        # on the default behavior.
+        path_to_load = str(xml_path) if xml_path is not None else str(XML_PATH)
+        if path_to_load not in _MODEL_CACHE:
+            _MODEL_CACHE[path_to_load] = mj.MjModel.from_xml_path(path_to_load)
+        self.model = _MODEL_CACHE[path_to_load]
         self.data = mj.MjData(self.model)
         self.viewer = None
         self.base_bid = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "base_link")

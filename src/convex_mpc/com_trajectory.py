@@ -32,8 +32,15 @@ class ComTraj:
                         y_vel_des_body: float,
                         z_pos_des_body: float,
                         yaw_rate_des_body: float,
-                        time_step: float):
-        
+                        time_step: float,
+                        slope_deg: float = 0.0):
+        # slope_deg: known local terrain slope (deg), used to make the
+        # reference pitch and height terrain-relative instead of assuming
+        # flat, world-level ground. Defaults to 0.0 (identical to the
+        # original flat-ground-only behavior) for full backward
+        # compatibility with existing demos.
+        self.slope_rad = np.radians(slope_deg)
+
         self.initial_x_vec= go2.compute_com_x_vec()
         initial_pos = self.initial_x_vec[0:3]
         self.m = go2.data.Ig.mass
@@ -87,14 +94,30 @@ class ComTraj:
             self.pos_des_world.reshape(3, 1) + (vel_desired_world.reshape(3, 1) * t_vec.reshape(1, N))
         )
 
+        # Terrain-relative height reference (fix, per external comparison
+        # against the RL policy): the base height reference was previously
+        # a fixed world-level value regardless of terrain, asking the robot
+        # to fight gravity/geometry continuously while walking up/down a
+        # slope rather than maintaining a constant height ABOVE the local
+        # ground. For a slope pivoting through the world origin (matching
+        # the convention used elsewhere in this project), local terrain
+        # height at position x is -x*tan(slope_rad). Applied across the
+        # whole prediction horizon (not just the current instant), since
+        # the horizon's own x position changes as the robot walks.
+        terrain_height_at_x = -self.pos_traj_world[0, :] * np.tan(self.slope_rad)
+        self.pos_traj_world[2, :] = z_pos_des_body + terrain_height_at_x
 
         # Linear velocity in world: constant over horizon
         self.vel_traj_world[:, :] = vel_desired_world.reshape(3, 1)
 
         # RPY in world:
-        # Keep roll, pitch constant; integrate yaw with desired yaw rate
+        # Pitch reference now matches the local terrain slope (fix, same
+        # category as the height fix above) instead of assuming flat,
+        # world-level ground -- roll stays 0 since this project's slope
+        # terrain is a pure Y-axis/pitch-plane tilt. Yaw still integrates
+        # with the desired yaw rate as before.
         self.rpy_traj_world[0, :] = 0.0
-        self.rpy_traj_world[1, :] = 0.0
+        self.rpy_traj_world[1, :] = self.slope_rad
         self.rpy_traj_world[2, :] = yaw + yaw_rate_des_body * t_vec
 
         # RPY rates in BODY frame: only yaw rate non-zero

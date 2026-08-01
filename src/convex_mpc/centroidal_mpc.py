@@ -21,6 +21,16 @@ OPTS = {
     'warm_start_primal': True,
     'warm_start_dual': True,
 
+    # error_on_fail=False: a hard solver failure returns a (possibly
+    # suboptimal/invalid) solution instead of raising an uncaught exception.
+    # Needed for RL-driven use (residual correction training): unlike the
+    # original hand-tuned demos, which only ever fed this solver smooth,
+    # sensible references, RL exploration will push references to extreme
+    # or nonsensical values, especially early in training -- this must be
+    # handled gracefully (checked via solve_QP's returned success flag) by
+    # the caller, not allowed to crash the whole process.
+    'error_on_fail': False,
+
     "osqp": {
         "eps_abs": 1e-4,
         "eps_rel": 1e-4,
@@ -43,6 +53,7 @@ class CentroidalMPC:
         self.R = COST_MATRIX_R 
         self.nvars = traj.N * NX + traj.N * NU    # Total number of decision variables                          
         self.solve_time: float = 0 
+        self.last_solve_success: bool = True
         self.N = traj.N
 
         # Below we compute the constant elements of the MPC controller
@@ -103,6 +114,14 @@ class CentroidalMPC:
         t_solve   = t2 - t1         # Time spent on solving the QP
         self.update_time = t_compute * 1e3
         self.solve_time = t_solve * 1e3
+
+        # 5b) Expose solve success/failure (fix, needed for RL-driven use --
+        # see OPTS['error_on_fail'] comment above). Callers should check
+        # mpc.last_solve_success before trusting the returned solution.
+        stats_check = self.solver.stats()
+        self.last_solve_success = stats_check.get('return_status') in ("solved", "solved_inaccurate")
+        if not self.last_solve_success:
+            print(f"[MPC] QP solve failed: {stats_check.get('return_status')}")
 
         # 6) Save the solution for warm start next time
         self.x_prev = sol["x"]              # Warm start primal
