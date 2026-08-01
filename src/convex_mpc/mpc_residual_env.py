@@ -23,6 +23,7 @@ from convex_mpc.com_trajectory import ComTraj
 from convex_mpc.centroidal_mpc import CentroidalMPC
 from convex_mpc.leg_controller import LegController, LEG_NAMES
 from convex_mpc.gait import Gait
+from convex_mpc.inplace_terrain import get_universal_model, set_flat, set_slope, set_step
 
 GAIT_HZ = 3
 GAIT_DUTY = 0.6
@@ -46,25 +47,6 @@ MAX_HEIGHT_CORRECTION_M  = 0.05
 
 EPISODE_LENGTH_S = 6.0
 X_VEL_DES = 0.6
-
-# Loaded once per process from the pre-generated terrain library (fix: see
-# generate_terrain_library.py docstring -- repeated create/delete of temp
-# terrain files was found to trigger a recurring MuJoCo resource-exhaustion
-# bug; episodes now pick from a fixed, never-deleted set instead).
-_TERRAIN_LIBRARY = None
-
-
-def _load_terrain_library():
-    global _TERRAIN_LIBRARY
-    if _TERRAIN_LIBRARY is not None:
-        return _TERRAIN_LIBRARY
-    library = {"flat": [], "slope": [], "step_up": [], "step_down": []}
-    with open("terrain_library.txt") as f:
-        for line in f:
-            kind, path, slope_deg = line.strip().split("\t")
-            library[kind].append((path, float(slope_deg)))
-    _TERRAIN_LIBRARY = library
-    return library
 
 
 class MPCResidualEnv(gym.Env):
@@ -106,33 +88,40 @@ class MPCResidualEnv(gym.Env):
         self._episode_reward = 0.0
 
     def _sample_terrain(self):
-        library = _load_terrain_library()
+        """Samples a terrain kind and continuous parameter, then mutates the
+        shared universal model in-place -- genuinely continuous randomization
+        (not a fixed discrete library), since mutation has no disk I/O cost
+        and doesn't touch the from_xml_path resource-exhaustion trigger."""
         names = list(self.terrain_curriculum.keys())
         probs = np.array([self.terrain_curriculum[n] for n in names])
         probs = probs / probs.sum()
         choice = self.np_random.choice(names, p=probs)
 
-        if choice == "step":
-            direction = self.np_random.choice(["step_up", "step_down"])
-            entries = library[direction]
-            idx = self.np_random.integers(0, len(entries))
-            path, true_slope = entries[idx]
-            return path, direction, true_slope
+        model = get_universal_model()
+        if choice == "flat":
+            set_flat(model)
+            return "flat", 0.0
+        elif choice == "slope":
+            slope_deg = self.np_random.uniform(-15, 15)
+            if abs(slope_deg) < 2.0:
+                slope_deg = np.sign(slope_deg) * 2.0 if slope_deg != 0 else 5.0
+            set_slope(model, slope_deg)
+            return "slope", slope_deg
         else:
-            entries = library[choice]
-            idx = self.np_random.integers(0, len(entries))
-            path, true_slope = entries[idx]
-            return path, choice, true_slope
+            direction = self.np_random.choice(["step_up", "step_down"])
+            step_height = self.np_random.uniform(0.03, 0.08)
+            set_step(model, step_height, direction="up" if direction == "step_up" else "down")
+            return direction, 0.0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        xml_path, terrain_kind, true_slope_deg = self._sample_terrain()
+        terrain_kind, true_slope_deg = self._sample_terrain()
         self._terrain_kind = terrain_kind
         self._true_slope_deg = true_slope_deg  # used ONLY for fall detection, never observed by the policy
 
         self.go2 = PinGo2Model()
-        self.mujoco_go2 = MuJoCo_GO2_Model(xml_path=xml_path)
+        self.mujoco_go2 = MuJoCo_GO2_Model(model=get_universal_model())
         self.leg_ctrl = LegController()
         self.traj = ComTraj(self.go2)
         self.gait = Gait(GAIT_HZ, GAIT_DUTY)

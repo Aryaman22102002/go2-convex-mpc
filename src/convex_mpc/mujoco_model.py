@@ -29,14 +29,22 @@ _MODEL_CACHE = {}
 
 
 class MuJoCo_GO2_Model:
-    def __init__(self, xml_path=None):
+    def __init__(self, xml_path=None, model=None):
         # Allow overriding the default flat scene.xml, e.g. to test slope/step
         # terrain variants, without touching any existing scripts that rely
-        # on the default behavior.
-        path_to_load = str(xml_path) if xml_path is not None else str(XML_PATH)
-        if path_to_load not in _MODEL_CACHE:
-            _MODEL_CACHE[path_to_load] = mj.MjModel.from_xml_path(path_to_load)
-        self.model = _MODEL_CACHE[path_to_load]
+        # on the default behavior. If `model` is passed directly (a
+        # pre-loaded, possibly in-place-mutated MjModel), use it as-is and
+        # skip path-based loading/caching entirely -- this is the path used
+        # by the in-place terrain mutation approach, which loads a single
+        # model once and mutates its geometry per episode rather than
+        # loading a different file per terrain.
+        if model is not None:
+            self.model = model
+        else:
+            path_to_load = str(xml_path) if xml_path is not None else str(XML_PATH)
+            if path_to_load not in _MODEL_CACHE:
+                _MODEL_CACHE[path_to_load] = mj.MjModel.from_xml_path(path_to_load)
+            self.model = _MODEL_CACHE[path_to_load]
         self.data = mj.MjData(self.model)
         self.viewer = None
         self.base_bid = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "base_link")
