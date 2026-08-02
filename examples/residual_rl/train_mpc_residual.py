@@ -16,9 +16,9 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback,
 from convex_mpc.mpc_residual_env import MPCResidualEnv
 
 
-def make_env(action_channels="both"):
+def make_env():
     def _init():
-        return MPCResidualEnv(action_channels=action_channels)
+        return MPCResidualEnv()
     return _init
 
 
@@ -90,15 +90,12 @@ if __name__ == "__main__":
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--out", type=str, default="mpc_residual_policy")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/")
-    parser.add_argument("--action_channels", type=str, default="both",
-                         choices=["both", "pitch_only", "height_only"],
-                         help="Ablation: which residual channel(s) the policy controls.")
     args = parser.parse_args()
 
-    vec_env = SubprocVecEnv([make_env(args.action_channels) for _ in range(args.n_envs)])
+    vec_env = SubprocVecEnv([make_env() for _ in range(args.n_envs)])
     vec_env = VecMonitor(vec_env)
 
-    eval_env = SubprocVecEnv([make_env(args.action_channels)])
+    eval_env = SubprocVecEnv([make_env()])
     eval_env = VecMonitor(eval_env)
 
     if args.resume:
@@ -106,7 +103,7 @@ if __name__ == "__main__":
         model = PPO.load(args.resume, env=vec_env, device="auto")
         model.set_env(vec_env)
     else:
-        print(f"Starting fresh training (action_channels={args.action_channels})...")
+        print("Starting fresh training (pitch-only, 1D action space)...")
         model = PPO(
             policy="MlpPolicy",
             env=vec_env,
