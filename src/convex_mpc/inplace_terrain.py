@@ -91,29 +91,33 @@ def get_stone_ids(model):
 
 
 def set_stepping_stones(model, stone_length=0.3, gap_width=0.15, stone_width=0.6,
-                         lateral_jitter=0.0, rng=None):
-    """Lays out N_STONES stones in a row along +x with the given gap
-    between consecutive stones (edge-to-edge, not center-to-center),
-    starting at x=0. stone_length is the stone's extent along x (direction
-    of travel); stone_width is its extent along y. Optional per-stone
-    lateral (y) jitter for added difficulty, requiring an rng if used.
+                         lateral_jitter=0.0, rng=None, n_runway_stones=3):
+    """Lays out N_STONES stones in a row along +x. The first
+    n_runway_stones are placed with ZERO gap between them (a continuous
+    solid runway), long enough to comfortably fit the robot's full stance
+    footprint at spawn -- fix: a quadruped's front-to-rear foot spacing
+    can exceed a single short stone's length, meaning the robot could
+    straddle a real gap from the very first instant regardless of the
+    gap_width actually being tested, an artifact unrelated to genuine
+    gap-crossing difficulty. Real gaps of gap_width begin only after the
+    runway. stone_length is the stone's extent along x (direction of
+    travel); stone_width is its extent along y. Optional per-stone
+    lateral (y) jitter for added difficulty (applied only past the
+    runway), requiring an rng if used.
 
-    Stone top surface is placed at z=0 (fix: previously centered at z=0,
-    meaning the top surface sat at +half_height, causing the robot's
-    default z=0-ground-assuming spawn pose to start embedded in the first
-    stone -- an immediate, violent contact penetration and fall totally
-    unrelated to gap-crossing, the same category of initial-condition
-    mismatch found and fixed for slope terrain earlier via RSI).
+    Stone top surface is placed at z=0 (matching flat-ground convention
+    used everywhere else in this project).
     """
     stone_height = 0.05
     stone_ids = get_stone_ids(model)
     x = 0.0
-    for sid in stone_ids:
+    for i, sid in enumerate(stone_ids):
         y = 0.0
-        if lateral_jitter > 0.0 and rng is not None:
+        if i >= n_runway_stones and lateral_jitter > 0.0 and rng is not None:
             y = rng.uniform(-lateral_jitter, lateral_jitter)
         model.geom_pos[sid] = [x + stone_length / 2.0, y, -stone_height / 2.0]
         model.geom_size[sid] = [stone_length / 2.0, stone_width / 2.0, stone_height / 2.0]
         model.geom_contype[sid] = 1
         model.geom_conaffinity[sid] = 1
-        x += stone_length + gap_width
+        this_gap = 0.0 if i < n_runway_stones - 1 else gap_width
+        x += stone_length + this_gap
