@@ -25,14 +25,25 @@ tree = ET.parse(BASE_XML)
 root = tree.getroot()
 worldbody = root.find("worldbody")
 
-# Sink the original flat floor far below and non-colliding -- stepping
-# stones become the ONLY walkable surface. A foot that misses a stone
-# has nothing to catch it (matching a real gap), rather than silently
-# landing on a hidden flat floor underneath.
+# Keep the floor plane ACTIVE, but make it FINITE and position it to
+# cover only the runway/approach region, ending exactly where the box
+# stones begin (fix: sinking the plane away entirely forced 100%
+# continuous box contact, which direct testing showed causes real WBC
+# instability -- "max iterations reached"/"solved inaccurate" repeatedly,
+# even on a single giant flat box with no gaps at all. Every prior
+# successful use of box geoms in this project, e.g. step terrain, only
+# ever used box contact BRIEFLY, backed by a stable plane majority of the
+# time. This keeps that same pattern: stable, proven plane contact for
+# the approach, box contact only for the actual challenge region.
+#
+# MuJoCo plane size="sx sy spacing": sx/sy are HALF-extents (0 = infinite
+# in that direction). A finite sx lets the plane end at a specific x.
+PLANE_END_X = -0.5  # plane covers x in [-100.5, -0.5]; stones begin at x=-0.5
 floor = worldbody.find("geom")  # 'floor' geom is first, per existing convention
-floor.set("pos", "0 0 -1000")
-floor.set("contype", "0")
-floor.set("conaffinity", "0")
+plane_half_extent = 100.0
+plane_center_x = PLANE_END_X - plane_half_extent
+floor.set("pos", f"{plane_center_x:.3f} 0 0")
+floor.set("size", f"{plane_half_extent} 0 0.05")  # finite in x, infinite in y
 
 for i in range(N_STONES):
     stone = ET.SubElement(worldbody, "geom")
