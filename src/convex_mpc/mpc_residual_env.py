@@ -149,7 +149,6 @@ class MPCResidualEnv(gym.Env):
         # Per-episode tracking, per external review's required logging
         self._n_decision_steps = 0
         self._n_raw_pitch_saturated = 0    # |raw pitch corr| > 0.95*max
-        self._n_raw_height_saturated = 0
         self._n_mpc_infeasible = 0
         self._n_wbc_infeasible = 0
         self._sum_pitch_accel_err = 0.0
@@ -185,6 +184,7 @@ class MPCResidualEnv(gym.Env):
         action = np.clip(action, -1.0, 1.0).copy()
         raw_pitch_corr_deg = float(action[0]) * MAX_PITCH_CORRECTION_DEG
         height_corr_m = 0.0   # height channel removed entirely (see class docstring)
+        raw_height_corr_m = 0.0
 
         # Low-pass filter the APPLIED correction (fix, per external review):
         # u_applied_t = (1-alpha)*u_applied_{t-1} + alpha*u_RL_t. Prevents
@@ -203,8 +203,6 @@ class MPCResidualEnv(gym.Env):
         self._n_decision_steps += 1
         if abs(action[0]) > 0.95:
             self._n_raw_pitch_saturated += 1
-        if abs(action[1]) > 0.95:
-            self._n_raw_height_saturated += 1
 
         # Run CTRL_DECIM sim sub-steps per RL step, doing exactly one MPC
         # update at the start (RL acts once per MPC update, not every
@@ -345,7 +343,6 @@ class MPCResidualEnv(gym.Env):
                 # the residual range may be too small or the policy may be
                 # exploiting the boundary
                 "frac_pitch_saturated": self._n_raw_pitch_saturated / n,
-                "frac_height_saturated": self._n_raw_height_saturated / n,
                 # QP feasibility, tracked distinct from physical falls (per review)
                 "n_mpc_infeasible": self._n_mpc_infeasible,
                 "n_wbc_infeasible": self._n_wbc_infeasible,
