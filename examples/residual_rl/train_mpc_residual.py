@@ -16,9 +16,11 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback,
 from convex_mpc.mpc_residual_env import MPCResidualEnv
 
 
-def make_env():
+def make_env(slope_weight=0.33):
+    remaining = (1.0 - slope_weight) / 2.0
+    curriculum = {"flat": remaining, "slope": slope_weight, "step": remaining}
     def _init():
-        return MPCResidualEnv()
+        return MPCResidualEnv(terrain_curriculum=curriculum)
     return _init
 
 
@@ -88,12 +90,14 @@ if __name__ == "__main__":
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--out", type=str, default="mpc_residual_policy")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/")
+    parser.add_argument("--slope_weight", type=float, default=0.33,
+                         help="Curriculum weight on slope terrain (remainder split evenly flat/step)")
     args = parser.parse_args()
 
-    vec_env = SubprocVecEnv([make_env() for _ in range(args.n_envs)])
+    vec_env = SubprocVecEnv([make_env(args.slope_weight) for _ in range(args.n_envs)])
     vec_env = VecMonitor(vec_env)
 
-    eval_env = SubprocVecEnv([make_env()])
+    eval_env = SubprocVecEnv([make_env(args.slope_weight)])
     eval_env = VecMonitor(eval_env)
 
     if args.resume:
