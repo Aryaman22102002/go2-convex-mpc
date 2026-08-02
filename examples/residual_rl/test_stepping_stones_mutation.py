@@ -17,8 +17,10 @@ print(f"Loaded stepping-stones model. {len(stone_ids)} stone geom ids: {stone_id
 
 print("\n=== Verifying layout correctness (with runway) ===")
 N_RUNWAY = 3
-set_stepping_stones(model, stone_length=0.3, gap_width=0.15, stone_width=0.6, n_runway_stones=N_RUNWAY)
-expected_x = 0.0
+START_X = -0.5
+set_stepping_stones(model, stone_length=0.3, gap_width=0.15, stone_width=0.6,
+                     n_runway_stones=N_RUNWAY, start_x=START_X)
+expected_x = START_X
 for i, sid in enumerate(stone_ids):
     pos = model.geom_pos[sid]
     size = model.geom_size[sid]

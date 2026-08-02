@@ -91,26 +91,28 @@ def get_stone_ids(model):
 
 
 def set_stepping_stones(model, stone_length=0.3, gap_width=0.15, stone_width=0.6,
-                         lateral_jitter=0.0, rng=None, n_runway_stones=3):
-    """Lays out N_STONES stones in a row along +x. The first
-    n_runway_stones are placed with ZERO gap between them (a continuous
-    solid runway), long enough to comfortably fit the robot's full stance
-    footprint at spawn -- fix: a quadruped's front-to-rear foot spacing
-    can exceed a single short stone's length, meaning the robot could
-    straddle a real gap from the very first instant regardless of the
-    gap_width actually being tested, an artifact unrelated to genuine
-    gap-crossing difficulty. Real gaps of gap_width begin only after the
-    runway. stone_length is the stone's extent along x (direction of
-    travel); stone_width is its extent along y. Optional per-stone
-    lateral (y) jitter for added difficulty (applied only past the
-    runway), requiring an rng if used.
+                         lateral_jitter=0.0, rng=None, n_runway_stones=3, start_x=-0.5):
+    """Lays out N_STONES stones in a row along +x, STARTING at start_x
+    (fix: confirmed via direct foot-position measurement that the robot's
+    rear feet sit at roughly x=-0.19 relative to its base at spawn -- a
+    stone sequence starting exactly at x=0 leaves the rear feet standing
+    on nothing at all from the very first instant, regardless of gap
+    width or stone length, since it's a margin problem behind the robot,
+    not a within-terrain gap problem). start_x=-0.5 gives comfortable
+    clearance for the robot's full foot spread.
+
+    The first n_runway_stones are placed with ZERO gap between them (a
+    continuous solid runway) before any real gaps begin. stone_length is
+    the stone's extent along x (direction of travel); stone_width is its
+    extent along y. Optional per-stone lateral (y) jitter for added
+    difficulty (applied only past the runway), requiring an rng if used.
 
     Stone top surface is placed at z=0 (matching flat-ground convention
     used everywhere else in this project).
     """
     stone_height = 0.05
     stone_ids = get_stone_ids(model)
-    x = 0.0
+    x = start_x
     for i, sid in enumerate(stone_ids):
         y = 0.0
         if i >= n_runway_stones and lateral_jitter > 0.0 and rng is not None:
