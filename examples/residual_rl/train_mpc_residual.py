@@ -60,7 +60,6 @@ class ResidualEpisodeOutcomeCallback(BaseCallback):
                     reasons[e["term_reason"]] += 1
                 reason_str = "  ".join(f"{k}={v/n:.1%}" for k, v in sorted(reasons.items()))
                 mean_pitch_sat = np.mean([e["frac_pitch_saturated"] for e in buf])
-                mean_height_sat = np.mean([e["frac_height_saturated"] for e in buf])
                 mean_mpc_infeas = np.mean([e["frac_mpc_infeasible"] for e in buf])
                 mean_wbc_infeas = np.mean([e["frac_wbc_infeasible"] for e in buf])
                 mean_pitch_accel_err = np.mean([e["mean_pitch_accel_err"] for e in buf])
@@ -69,14 +68,13 @@ class ResidualEpisodeOutcomeCallback(BaseCallback):
                 print(f"  {label:10s} n={n:4d}  success_rate={success_rate:.1%}  "
                       f"mean_len={mean_len:6.1f}  mean_rew={mean_rew:7.2f}")
                 print(f"             termination: {reason_str}")
-                print(f"             saturation: pitch={mean_pitch_sat:.1%}  height={mean_height_sat:.1%}  "
+                print(f"             saturation: pitch={mean_pitch_sat:.1%}  "
                       f"| infeasible: mpc={mean_mpc_infeas:.2%}  wbc={mean_wbc_infeas:.2%}  "
                       f"| mean_pitch_accel_err={mean_pitch_accel_err:.3f}")
 
                 self.logger.record(f"residual/{label}_success_rate", success_rate)
                 self.logger.record(f"residual/{label}_mean_len", mean_len)
                 self.logger.record(f"residual/{label}_pitch_saturation", mean_pitch_sat)
-                self.logger.record(f"residual/{label}_height_saturation", mean_height_sat)
                 self.logger.record(f"residual/{label}_mpc_infeasible_frac", mean_mpc_infeas)
                 self.logger.record(f"residual/{label}_wbc_infeasible_frac", mean_wbc_infeas)
                 self.logger.record(f"residual/{label}_pitch_accel_err", mean_pitch_accel_err)
