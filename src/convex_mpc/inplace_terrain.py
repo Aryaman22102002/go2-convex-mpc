@@ -97,15 +97,23 @@ def set_stepping_stones(model, stone_length=0.3, gap_width=0.15, stone_width=0.6
     starting at x=0. stone_length is the stone's extent along x (direction
     of travel); stone_width is its extent along y. Optional per-stone
     lateral (y) jitter for added difficulty, requiring an rng if used.
+
+    Stone top surface is placed at z=0 (fix: previously centered at z=0,
+    meaning the top surface sat at +half_height, causing the robot's
+    default z=0-ground-assuming spawn pose to start embedded in the first
+    stone -- an immediate, violent contact penetration and fall totally
+    unrelated to gap-crossing, the same category of initial-condition
+    mismatch found and fixed for slope terrain earlier via RSI).
     """
+    stone_height = 0.05
     stone_ids = get_stone_ids(model)
     x = 0.0
     for sid in stone_ids:
         y = 0.0
         if lateral_jitter > 0.0 and rng is not None:
             y = rng.uniform(-lateral_jitter, lateral_jitter)
-        model.geom_pos[sid] = [x + stone_length / 2.0, y, 0.0]
-        model.geom_size[sid] = [stone_length / 2.0, stone_width / 2.0, 0.05]
+        model.geom_pos[sid] = [x + stone_length / 2.0, y, -stone_height / 2.0]
+        model.geom_size[sid] = [stone_length / 2.0, stone_width / 2.0, stone_height / 2.0]
         model.geom_contype[sid] = 1
         model.geom_conaffinity[sid] = 1
         x += stone_length + gap_width

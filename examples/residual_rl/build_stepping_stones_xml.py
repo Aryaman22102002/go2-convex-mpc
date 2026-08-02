@@ -40,7 +40,7 @@ for i in range(N_STONES):
     stone.set("type", "box")
     # Nominal starting layout: evenly spaced along +x, will be
     # repositioned/resized per episode via the MuJoCo API
-    stone.set("pos", f"{i * 0.5:.3f} 0 0")
+    stone.set("pos", f"{i * 0.5:.3f} 0 -0.025")
     stone.set("size", "0.15 0.3 0.05")
     stone.set("friction", "0.8 0.005 0.0001")
 
