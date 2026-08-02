@@ -111,7 +111,7 @@ def run_trial(gap_width, stone_length=0.3, stone_width=0.6, seed=0):
 
 if __name__ == "__main__":
     import sys
-    gap_widths = [0.05, 0.10, 0.15, 0.20, 0.25]
+    gap_widths = [0.25, 0.35, 0.45, 0.55, 0.65, 0.80]
     n_trials = int(sys.argv[1]) if len(sys.argv) > 1 else 5
 
     for gap_width in gap_widths:
