@@ -51,11 +51,19 @@ X_VEL_DES = 0.6
 
 class MPCResidualEnv(gym.Env):
     """Residual correction on top of the existing MPC+WBC pipeline.
-    Action: [pitch_correction, height_correction], each in [-1, 1] before
-    scaling. Reference pitch/height passed to ComTraj.generate_traj becomes
-    slope_deg_estimate + pitch_correction*MAX_PITCH_CORRECTION_DEG (in the
-    trajectory's own slope_deg argument) and z_pos_des_body +
-    height_correction*MAX_HEIGHT_CORRECTION_M.
+    Action: [pitch_correction], in [-1, 1] before scaling. Reference pitch
+    passed to ComTraj.generate_traj becomes
+    pitch_correction*MAX_PITCH_CORRECTION_DEG (in the trajectory's own
+    slope_deg argument).
+
+    Height correction REMOVED (fix, per channel ablation + external review):
+    controlled ablation on the trained 2D policy showed height_only performed
+    NO BETTER than zero-residual (0% survival on downhill slope, identical to
+    doing nothing), while pitch_only exactly reproduced the full 2D policy's
+    result (27.3%, matching "both"). Despite the height channel showing high
+    (~70%) saturation during training, it was not causally responsible for
+    any of the measured improvement -- keeping a demonstrably inactive
+    channel only adds action-space complexity and weakens interpretability.
 
     Note: this does NOT give the policy the true slope_deg -- the residual
     is applied as a correction to a DEFAULT flat-ground reference (slope_deg
@@ -68,23 +76,17 @@ class MPCResidualEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, terrain_curriculum=None, action_channels="both"):
+    def __init__(self, terrain_curriculum=None):
         super().__init__()
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(17,), dtype=np.float32)
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(16,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
 
         # Default curriculum: even mix of flat/slope/step, can be overridden
         # for evaluation (e.g. forcing slope-only)
         self.terrain_curriculum = terrain_curriculum or {"flat": 0.34, "slope": 0.33, "step": 0.33}
 
-        # Ablation support (per review): "both", "pitch_only", "height_only".
-        # Action space stays 2D regardless (simplest, no architecture change
-        # needed); the disabled channel is forced to zero before use.
-        assert action_channels in ("both", "pitch_only", "height_only")
-        self.action_channels = action_channels
-
-        self._last_correction = np.zeros(2, dtype=np.float32)
-        self._applied_correction = np.zeros(2)
+        self._last_correction = np.zeros(1, dtype=np.float32)
+        self._applied_correction = np.zeros(1)
         self._episode_reward = 0.0
 
     def _sample_terrain(self):
@@ -139,7 +141,7 @@ class MPCResidualEnv(gym.Env):
         self._ctrl_i = 0
         self._sim_k = 0
         self._tau_hold = np.zeros(12, dtype=float)
-        self._last_correction = np.zeros(2, dtype=np.float32)
+        self._last_correction = np.zeros(1, dtype=np.float32)
         self._applied_correction = np.zeros(2)
         self._episode_reward = 0.0
         self.max_ctrl_steps = int(EPISODE_LENGTH_S * CTRL_HZ)
@@ -181,12 +183,8 @@ class MPCResidualEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(action, -1.0, 1.0).copy()
-        if self.action_channels == "pitch_only":
-            action[1] = 0.0
-        elif self.action_channels == "height_only":
-            action[0] = 0.0
         raw_pitch_corr_deg = float(action[0]) * MAX_PITCH_CORRECTION_DEG
-        raw_height_corr_m  = float(action[1]) * MAX_HEIGHT_CORRECTION_M
+        height_corr_m = 0.0   # height channel removed entirely (see class docstring)
 
         # Low-pass filter the APPLIED correction (fix, per external review):
         # u_applied_t = (1-alpha)*u_applied_{t-1} + alpha*u_RL_t. Prevents
@@ -196,13 +194,11 @@ class MPCResidualEnv(gym.Env):
         # downstream low-level controller.
         ALPHA = 0.3
         pitch_corr_deg = (1 - ALPHA) * self._applied_correction[0] + ALPHA * raw_pitch_corr_deg
-        height_corr_m  = (1 - ALPHA) * self._applied_correction[1] + ALPHA * raw_height_corr_m
-        self._applied_correction = np.array([pitch_corr_deg, height_corr_m])
+        self._applied_correction = np.array([pitch_corr_deg])
         # Policy observes the actually-applied (smoothed) correction, not
         # the raw action, so it has an accurate view of committed state
         self._last_correction = np.array(
-            [pitch_corr_deg / MAX_PITCH_CORRECTION_DEG,
-             height_corr_m / MAX_HEIGHT_CORRECTION_M], dtype=np.float32)
+            [pitch_corr_deg / MAX_PITCH_CORRECTION_DEG], dtype=np.float32)
 
         self._n_decision_steps += 1
         if abs(action[0]) > 0.95:
