@@ -76,7 +76,7 @@ class MPCResidualEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, terrain_curriculum=None):
+    def __init__(self, terrain_curriculum=None, uphill_frac=0.8):
         super().__init__()
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(16,), dtype=np.float32)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
@@ -84,6 +84,9 @@ class MPCResidualEnv(gym.Env):
         # Default curriculum: even mix of flat/slope/step, can be overridden
         # for evaluation (e.g. forcing slope-only)
         self.terrain_curriculum = terrain_curriculum or {"flat": 0.34, "slope": 0.33, "step": 0.33}
+        # Fraction of "slope" episodes drawn from genuine uphill (vs genuine
+        # downhill, kept only as a regression check -- see _sample_terrain)
+        self.uphill_frac = uphill_frac
 
         self._last_correction = np.zeros(1, dtype=np.float32)
         self._applied_correction = np.zeros(1)
@@ -104,9 +107,19 @@ class MPCResidualEnv(gym.Env):
             set_flat(model)
             return "flat", 0.0
         elif choice == "slope":
-            slope_deg = self.np_random.uniform(-15, 15)
-            if abs(slope_deg) < 2.0:
-                slope_deg = np.sign(slope_deg) * 2.0 if slope_deg != 0 else 5.0
+            # Biased toward genuine UPHILL (negative slope_deg, per
+            # tonight's corrected labeling -- confirmed via terrain_h
+            # trace + visual side-view video that negative slope_deg is
+            # ground RISING as the robot walks forward). Genuine DOWNHILL
+            # (positive slope_deg) is already confirmed 100% solved by
+            # zero-residual across the full 2-15deg range (n=50), so most
+            # training signal should go where it's actually needed; a
+            # smaller uphill_downhill_frac keeps enough downhill exposure
+            # to verify no regression, not to learn anything new there.
+            if self.np_random.uniform(0, 1) < self.uphill_frac:
+                slope_deg = self.np_random.uniform(-15, -2)   # genuine uphill
+            else:
+                slope_deg = self.np_random.uniform(2, 15)     # genuine downhill (regression check)
             set_slope(model, slope_deg)
             return "slope", slope_deg
         else:
