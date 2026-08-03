@@ -49,6 +49,16 @@ class ResidualEpisodeOutcomeCallback(BaseCallback):
         if self.num_timesteps - self._last_logged >= self.log_freq:
             self._last_logged = self.num_timesteps
             print(f"\n[residual episode outcomes @ {self.num_timesteps:,} steps]")
+            # Per external review: track actual COLLECTED TRANSITIONS per
+            # terrain, not just episode-selection fraction -- if uphill
+            # episodes terminate much faster than downhill ones, an 80%
+            # episode-selection split could still under-represent uphill
+            # in the actual PPO rollout buffer.
+            real_terrains = ["flat", "slope", "step_up", "step_down"]
+            transitions_by_terrain = {t: sum(e["l"] for e in self._buffers[t]) for t in real_terrains}
+            total_transitions = sum(transitions_by_terrain.values()) or 1
+            print("  [transition fractions] " + "  ".join(
+                f"{t}={transitions_by_terrain[t]/total_transitions:.1%}" for t in real_terrains))
             for terrain in ["flat", "slope", "step_up", "step_down", "__all__"]:
                 buf = self._buffers[terrain]
                 if not buf:
