@@ -10,6 +10,7 @@ unmodified MPC+WBC behavior exactly).
 """
 import argparse
 import numpy as np
+import torch
 from collections import defaultdict, deque
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
@@ -100,6 +101,12 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=500_000)
     parser.add_argument("--n_envs", type=int, default=8)
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--resume_weights", type=str, default=None,
+                         help="Path to a state_dict .pt file (extracted in isolation via "
+                              "torch.save(model.policy.state_dict(), ...)) to load into a "
+                              "freshly-constructed PPO. Use this INSTEAD of --resume when "
+                              "PPO.load() segfaults due to a torch/physics-stack C-extension "
+                              "conflict in this process.")
     parser.add_argument("--out", type=str, default="mpc_residual_policy")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/")
     parser.add_argument("--slope_weight", type=float, default=0.33,
@@ -117,10 +124,13 @@ if __name__ == "__main__":
 
     if args.resume:
         print(f"Resuming from {args.resume}...")
-        model = PPO.load(args.resume, env=vec_env, device="auto")
+        model = PPO.load(args.resume, env=vec_env, device="cpu")
         model.set_env(vec_env)
     else:
-        print("Starting fresh training (pitch-only, 1D action space)...")
+        if args.resume_weights:
+            print(f"Constructing fresh PPO and loading extracted weights from {args.resume_weights}...")
+        else:
+            print("Starting fresh training (pitch-only, 1D action space)...")
         model = PPO(
             policy="MlpPolicy",
             env=vec_env,
@@ -139,8 +149,12 @@ if __name__ == "__main__":
             # policy than the full-locomotion RL work is appropriate.
             policy_kwargs=dict(net_arch=[64, 64]),
             verbose=1,
-            device="auto",
+            device="cpu",
         )
+        if args.resume_weights:
+            state_dict = torch.load(args.resume_weights, map_location="cpu")
+            model.policy.load_state_dict(state_dict)
+            print("Weights loaded successfully into freshly-constructed PPO.")
 
     checkpoint_cb = CheckpointCallback(
         save_freq=max(50_000 // args.n_envs, 1),
