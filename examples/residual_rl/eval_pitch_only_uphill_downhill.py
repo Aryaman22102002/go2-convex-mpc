@@ -43,9 +43,11 @@ if __name__ == "__main__":
     for trial in range(n_trials):
         seed = 5000 + trial
         for use_policy, label in [(False, "zero"), (True, "trained")]:
-            env = MPCResidualEnv(terrain_curriculum=curriculum)
+            env = MPCResidualEnv(terrain_curriculum=curriculum, uphill_frac=0.5)  # balanced for fair eval
             r = run_episode(env, model, use_policy, seed=seed)
-            direction = "uphill" if env._true_slope_deg > 0 else "downhill"
+            # CORRECTED (per tonight's terrain_h trace + visual confirmation):
+            # negative slope_deg = genuine uphill (ground rises), positive = genuine downhill
+            direction = "downhill" if env._true_slope_deg > 0 else "uphill"
             results[direction][label].append(r)
             print(f"Trial {trial} [{label:8s}] dir={direction:8s} steps={r['steps']:4d} "
                   f"reason={r['term_reason']}")
