@@ -2,9 +2,11 @@
 train_mpc_residual.py
 
 Trains the residual correction policy on top of the existing MPC+WBC
-pipeline. Much smaller problem than full joint-level RL: 2D action space,
-17D observation, and a working baseline controller underneath at every
-step (action=0 reproduces unmodified MPC+WBC behavior exactly).
+pipeline. Much smaller problem than full joint-level RL: 1D action space
+(pitch-only -- height channel removed per ablation evidence that it
+contributed no measurable benefit), 16D observation, and a working
+baseline controller underneath at every step (action=0 reproduces
+unmodified MPC+WBC behavior exactly).
 """
 import argparse
 import numpy as np
@@ -16,11 +18,11 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback,
 from convex_mpc.mpc_residual_env import MPCResidualEnv
 
 
-def make_env(slope_weight=0.33):
+def make_env(slope_weight=0.33, uphill_frac=0.8):
     remaining = (1.0 - slope_weight) / 2.0
     curriculum = {"flat": remaining, "slope": slope_weight, "step": remaining}
     def _init():
-        return MPCResidualEnv(terrain_curriculum=curriculum)
+        return MPCResidualEnv(terrain_curriculum=curriculum, uphill_frac=uphill_frac)
     return _init
 
 
@@ -102,12 +104,15 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/")
     parser.add_argument("--slope_weight", type=float, default=0.33,
                          help="Curriculum weight on slope terrain (remainder split evenly flat/step)")
+    parser.add_argument("--uphill_frac", type=float, default=0.8,
+                         help="Fraction of slope episodes drawn from genuine uphill "
+                              "(vs genuine downhill, kept as regression check)")
     args = parser.parse_args()
 
-    vec_env = SubprocVecEnv([make_env(args.slope_weight) for _ in range(args.n_envs)])
+    vec_env = SubprocVecEnv([make_env(args.slope_weight, args.uphill_frac) for _ in range(args.n_envs)])
     vec_env = VecMonitor(vec_env)
 
-    eval_env = SubprocVecEnv([make_env(args.slope_weight)])
+    eval_env = SubprocVecEnv([make_env(args.slope_weight, args.uphill_frac)])
     eval_env = VecMonitor(eval_env)
 
     if args.resume:
@@ -129,7 +134,7 @@ if __name__ == "__main__":
             ent_coef=0.01,
             vf_coef=0.5,
             max_grad_norm=0.5,
-            # Small network -- this is a 2D action / 17D observation
+            # Small network -- this is a 1D action / 16D observation
             # problem, not full joint-level control, so a much smaller
             # policy than the full-locomotion RL work is appropriate.
             policy_kwargs=dict(net_arch=[64, 64]),
