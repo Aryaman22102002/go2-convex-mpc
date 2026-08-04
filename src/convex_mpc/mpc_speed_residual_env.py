@@ -60,9 +60,18 @@ EPISODE_LENGTH_S = 6.0
 # the policy trivially learns max-slowdown everywhere.
 W_PROGRESS = 10.0    # reward per unit of ACTUAL forward velocity achieved
 W_TRACKING_ERR = 2.0  # penalize v_x_actual deviating from v_x_cmd (tracking quality)
-W_RESIDUAL = 1.0      # penalize |Delta_v_x| magnitude (only slow down when needed)
+W_RESIDUAL = 0.3      # penalize |Delta_v_x| magnitude (only slow down when needed) --
+                      # reduced from 1.0: at the old weight, slowing down cost reward
+                      # EVERY step, on top of the direct W_PROGRESS cost of lower v_x,
+                      # a double penalty that left no incentive to ever use this channel
 W_RATE = 2.0          # penalize step-to-step change in applied correction
-FALL_PENALTY = -50.0
+FALL_PENALTY = -500.0  # was -50: a failing-but-fast episode (e.g. 59 steps at
+                       # ~6/step =~354, -50 =~304) was NOT meaningfully worse than
+                       # succeeding slowly -- raised so failure genuinely dominates
+                       # the accumulated progress-reward "savings" from never slowing down
+SUCCESS_BONUS = 300.0  # was implicit/zero: makes "slow but complete" unambiguously
+                       # better than "fast but fails partway", rather than relying
+                       # on the fall penalty alone to make that comparison work out
 INFEASIBLE_PENALTY = -20.0
 
 
@@ -270,6 +279,8 @@ class MPCSpeedResidualEnv(gym.Env):
             reward += FALL_PENALTY
         if mpc_solve_failed or wbc_solve_failed:
             reward += INFEASIBLE_PENALTY
+        if truncated and term_reason == "success_timeout":
+            reward += SUCCESS_BONUS
         self._episode_reward += reward
 
         info = {}
