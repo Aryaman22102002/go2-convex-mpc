@@ -116,13 +116,29 @@ if __name__ == "__main__":
         n_steps=2048,
         batch_size=256,
         n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
+        gamma=0.995,   # was 0.99 -- reviewer's diagnosis: gamma=0.95 (even our
+                       # prior 0.99) crushes a failure signal ~100+ steps away
+                       # into near-irrelevance relative to the immediate,
+                       # undiscounted progress reward every step
+        gae_lambda=0.97,  # was 0.95
         clip_range=0.2,
-        ent_coef=0.01,
+        ent_coef=0.001,  # was 0.01 -- per reviewer, reduce alongside the other
+                         # fixes rather than relying on entropy to rediscover
+                         # the slowdown region the actor mean had saturated out of
         vf_coef=0.5,
         max_grad_norm=0.5,
-        policy_kwargs=dict(net_arch=[64, 64]),
+        policy_kwargs=dict(net_arch=[64, 64], log_std_init=-1.0),
+        # NOTE: reviewer also suggested a structurally-bounded mean
+        # (tanh(f_theta(o)) before computing the Gaussian mean) to prevent
+        # saturation outside the action bounds entirely. Deferring that
+        # specific architectural change for now -- SB3's squash_output
+        # option is primarily documented/tested alongside SDE-based
+        # exploration, and I'm not fully confident it behaves correctly
+        # for a plain Gaussian policy without it. Per the reviewer's own
+        # verification order: check whether gamma/dense-reward fixes alone
+        # prevent re-saturation first (same actor-saturation diagnostic
+        # script we already used); only add a custom bounded-mean policy
+        # class if saturation recurs despite these fixes.
         verbose=1,
         device="cpu",
     )

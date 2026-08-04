@@ -60,18 +60,19 @@ EPISODE_LENGTH_S = 6.0
 # the policy trivially learns max-slowdown everywhere.
 W_PROGRESS = 10.0    # reward per unit of ACTUAL forward velocity achieved
 W_TRACKING_ERR = 2.0  # penalize v_x_actual deviating from v_x_cmd (tracking quality)
-W_RESIDUAL = 0.3      # penalize |Delta_v_x| magnitude (only slow down when needed) --
-                      # reduced from 1.0: at the old weight, slowing down cost reward
-                      # EVERY step, on top of the direct W_PROGRESS cost of lower v_x,
-                      # a double penalty that left no incentive to ever use this channel
+W_RESIDUAL = 0.3      # penalize |Delta_v_x| magnitude (only slow down when needed)
 W_RATE = 2.0          # penalize step-to-step change in applied correction
-FALL_PENALTY = -500.0  # was -50: a failing-but-fast episode (e.g. 59 steps at
-                       # ~6/step =~354, -50 =~304) was NOT meaningfully worse than
-                       # succeeding slowly -- raised so failure genuinely dominates
-                       # the accumulated progress-reward "savings" from never slowing down
-SUCCESS_BONUS = 300.0  # was implicit/zero: makes "slow but complete" unambiguously
-                       # better than "fast but fails partway", rather than relying
-                       # on the fall penalty alone to make that comparison work out
+W_HEIGHT_MARGIN = 40.0  # dense precursor-to-failure signal: penalizes approaching
+                        # the low_height threshold BEFORE it actually triggers,
+                        # giving PPO signal many steps earlier than the sparse
+                        # terminal fall penalty can reach under discounting
+HEIGHT_SAFE_MARGIN = 0.25  # start penalizing once height_rel drops below this
+                            # (threshold itself is 0.15, so this gives ~0.10m
+                            # of "early warning" runway)
+W_HEIGHT_RATE = 10.0    # penalize NEGATIVE height-rate (sinking), an even
+                        # earlier precursor than the margin term itself
+FALL_PENALTY = -500.0
+SUCCESS_BONUS = 300.0
 INFEASIBLE_PENALTY = -20.0
 
 
@@ -156,6 +157,7 @@ class MPCSpeedResidualEnv(gym.Env):
         self._n_mpc_infeasible = 0
         self._n_wbc_infeasible = 0
         self._ctrl_i = 0
+        self._prev_height_rel = None
 
         obs = self._get_obs()
         return obs, {}
@@ -271,10 +273,24 @@ class MPCSpeedResidualEnv(gym.Env):
         # Reward: forward progress minus tracking error minus unnecessary
         # slowdown minus chatter -- per review, prevents the policy from
         # trivially learning max-slowdown everywhere
+        # Dense precursor-to-failure signals, per reviewer: give PPO signal
+        # BEFORE the sparse terminal low_height event, which discounting
+        # otherwise crushes into irrelevance over a long horizon
+        margin_violation = max(0.0, HEIGHT_SAFE_MARGIN - height_rel)
+        reward_height_margin = -W_HEIGHT_MARGIN * margin_violation ** 2
+        if self._prev_height_rel is not None:
+            height_rate = (height_rel - self._prev_height_rel) / (CTRL_DT * STEPS_PER_MPC)
+            reward_height_rate = -W_HEIGHT_RATE * max(0.0, -height_rate) ** 2
+        else:
+            reward_height_rate = 0.0
+        self._prev_height_rel = height_rel
+
         reward = W_PROGRESS * v_x_actual
         reward -= W_TRACKING_ERR * (v_x_actual - v_x_cmd) ** 2
         reward -= W_RESIDUAL * applied_speed_corr ** 2
         reward -= W_RATE * (applied_speed_corr - self._applied_correction[0]) ** 2
+        reward += reward_height_margin
+        reward += reward_height_rate
         if terminated and term_reason in ("low_height", "extreme_roll", "extreme_pitch"):
             reward += FALL_PENALTY
         if mpc_solve_failed or wbc_solve_failed:
