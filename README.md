@@ -4,7 +4,7 @@
 
 This fork extends the base controller with a **Whole-Body Control (WBC) QP** that replaces the naive $\tau = J^T f$ stance torque mapping with a full rigid-body optimization. The WBC enforces friction cone constraints and torque limits at the joint level, eliminating the constraint violations that occur in the baseline controller across all gaits and surface conditions.
 
-Separately, this fork also explores a **learned (RL) alternative to the MPC+WBC controller**: a PPO policy trained via behavior cloning and imitation learning against trajectories recorded from the MPC+WBC controller itself. After an extensive debugging process (documented below), the policy now reliably reproduces a stable flat-ground trot -- 100% survival and consistent gait symmetry across 30 evaluation rollouts. Multi-terrain locomotion (slopes, steps) is the natural next step, building on this validated flat-ground foundation.
+Separately, this fork also explores **residual reinforcement learning layered on top of the MPC+WBC controller**, specifically for lateral disturbance recovery: an event-triggered PPO policy that activates only when a push disturbance is detected, validated with randomized trials to improve recovery success and reduce peak roll versus the nominal controller alone, with zero regression to normal walking. A follow-up investigation into multi-push robustness surfaced and fixed a genuine gating/state-accumulation bug, resulting in a three-state supervisor architecture validated to prevent falls under repeated disturbances that the baseline controller alone cannot recover from. See the [RL Push-Recovery](#rl-push-recovery-residual-ppo-on-mpcwbc) section below for full results, tables, and the honest scope of what was and wasn't validated.
 
 ---
 
@@ -14,7 +14,7 @@ Separately, this fork also explores a **learned (RL) alternative to the MPC+WBC 
 2. [Method](#method)
 3. [File Structure](#file-structure)
 4. [Results](#results)
-5. [RL Walking Gait (Imitation Learning)](#rl-walking-gait-imitation-learning)
+5. [RL Push-Recovery (Residual PPO on MPC/WBC)](#rl-push-recovery-residual-ppo-on-mpcwbc)
 6. [How to Run](#how-to-run)
 
 ---
@@ -99,7 +99,7 @@ where the constraint matrix stacks the EOM equality, friction pyramid inequaliti
 
 ### Why Joint-Only EOM
 
-The floating base rows of the EOM contain no $\tau$ (no motors on the floating base), so they are purely constraints on $f$. Combined with the friction pyramid constraints also on $f$, these two sets of constraints frequently conflict -- the forces required to satisfy floating base dynamics can violate the friction cone. Dropping the floating base rows resolves the infeasibility while remaining physically correct, since the MPC already enforces centroidal dynamics through its own QP.
+The floating base rows of the EOM contain no $\tau$ (no motors on the floating base), so they are purely constraints on $f$. Combined with the friction pyramid constraints also on $f$, these two sets of constraints frequently conflict: the forces required to satisfy floating base dynamics can violate the friction cone. Dropping the floating base rows resolves the infeasibility while remaining physically correct, since the MPC already enforces centroidal dynamics through its own QP.
 
 ### Contact Schedule
 
@@ -133,11 +133,11 @@ go2-convex-mpc/
 ```
 
 **Files added/modified in this fork:**
-- `src/convex_mpc/wbc_qp.py` -- WBC QP solver (new)
-- `src/convex_mpc/sim_params.py` -- Central parameter file (new)
-- `src/convex_mpc/leg_controller.py` -- Added `compute_all_torques` with WBC integration
-- `examples/ex02_trot_forward.py` -- Added baseline vs WBC comparison and violation logging
-- `examples/ex05_multi_gait_benchmark.py` -- Full multi-gait benchmark with videos and plots
+- `src/convex_mpc/wbc_qp.py`: WBC QP solver (new)
+- `src/convex_mpc/sim_params.py`: Central parameter file (new)
+- `src/convex_mpc/leg_controller.py`: Added `compute_all_torques` with WBC integration
+- `examples/ex02_trot_forward.py`: Added baseline vs WBC comparison and violation logging
+- `examples/ex05_multi_gait_benchmark.py`: Full multi-gait benchmark with videos and plots
 
 ---
 
@@ -181,7 +181,7 @@ Note: sideways trotting above 0.35 m/s exceeds the physical friction limit at $\
 
 ![Cumulative friction violations during trot forward at low friction](results_mu03/cumulative_trot_forward.png)
 
-The red curve climbs to over 580 violations per leg over 5 seconds. The blue WBC curve remains exactly flat at zero throughout the entire run. The shaded pink area represents the total improvement from the WBC. The step pattern in the baseline curve corresponds to the gait cycle -- violations occur in bursts during each stance phase.
+The red curve climbs to over 580 violations per leg over 5 seconds. The blue WBC curve remains exactly flat at zero throughout the entire run. The shaded pink area represents the total improvement from the WBC. The step pattern in the baseline curve corresponds to the gait cycle: violations occur in bursts during each stance phase.
 
 ---
 
@@ -191,7 +191,7 @@ The torque comparison shows what the WBC does differently at the actuator level,
 
 ![RL leg joint torques: Baseline vs WBC during trot forward](results_mu08/torque_comparison_RL_trot_forward.png)
 
-The baseline (red) produces large torque spikes that frequently clip against the motor limits (dashed lines), particularly at the hip and thigh joints. These spikes correspond directly to friction cone violations -- the large horizontal forces required for propulsion produce excessive joint torques via the naive $J^T f$ mapping. The WBC (blue) produces smoother torque profiles that respect limits because the QP explicitly bounds torques and traces the friction constraint, finding the minimum-effort solution that satisfies both.
+The baseline (red) produces large torque spikes that frequently clip against the motor limits (dashed lines), particularly at the hip and thigh joints. These spikes correspond directly to friction cone violations: the large horizontal forces required for propulsion produce excessive joint torques via the naive $J^T f$ mapping. The WBC (blue) produces smoother torque profiles that respect limits because the QP explicitly bounds torques and traces the friction constraint, finding the minimum-effort solution that satisfies both.
 
 ---
 
@@ -208,7 +208,7 @@ The WBC QP is solved at 200 Hz. The budget per tick is 5.0 ms.
 
 ![WBC QP solve time per control tick across all gaits](results_mu08/wbc_timing.png)
 
-Mean solve time across all gaits is **1.5 ms**, well within the 5.0 ms budget at 200 Hz. The WBC never exceeds the real-time budget across 1000 control ticks per gait. The QP is intentionally small -- 18 variables during trot ($n_z = 12 + 3 \times 2$), 12 EOM equality rows, 10 friction cone rows, and 18 box constraint rows -- enabling fast solves with OSQP warm starting. For reference, the centroidal MPC runs at 48 Hz with a mean cycle time of 3.19 ms against a 20.8 ms budget.
+Mean solve time across all gaits is **1.5 ms**, well within the 5.0 ms budget at 200 Hz. The WBC never exceeds the real-time budget across 1000 control ticks per gait. The QP is intentionally small (18 variables during trot, $n_z = 12 + 3 \times 2$, 12 EOM equality rows, 10 friction cone rows, and 18 box constraint rows), enabling fast solves with OSQP warm starting. For reference, the centroidal MPC runs at 48 Hz with a mean cycle time of 3.19 ms against a 20.8 ms budget.
 
 ---
 
@@ -228,86 +228,96 @@ At $\mu = 0.3$ the baseline slips and falls during forward trotting and rotation
 
 ---
 
-## RL Walking Gait (Imitation Learning)
+## RL Push-Recovery (Residual PPO on MPC/WBC)
 
-Separately from the WBC extension above, this fork also includes an RL locomotion policy for the Go2, trained via **behavior cloning (BC) pretraining followed by PPO fine-tuning** against trajectories recorded from the MPC+WBC controller above. This section documents the current, validated flat-ground result, the debugging process that got there, and what's next.
+Separately from the WBC extension above, this fork explores where **residual reinforcement learning** can add genuine value on top of the model-based MPC/WBC controller. Several formulations (slope-speed adaptation, contact-timing correction, gait-timing residuals, height/efficiency optimization) were evaluated systematically and scoped out early once benchmarking showed they did not outperform the baseline controller by a meaningful margin. **Disturbance recovery from lateral pushes** is the regime where residual RL was found to add a real, validated benefit, and the resulting controller was then extended to handle multiple, repeated disturbances through a structured diagnostic process described below.
 
-### Demo
+### Method
 
+An **event-triggered residual PPO controller** is layered on the existing MPC/WBC stack. The policy stays completely inactive during normal walking and activates only when a disturbance is actually detected, via thresholds on roll, roll-rate, and lateral velocity, so the nominal controller is untouched except in the specific regime it's weak in. When active, the policy outputs a small correction `[Δv_y, Δφ_roll_ref]` on top of the MPC's own commands.
 
-https://github.com/user-attachments/assets/2dd171ef-fa9d-42f1-bf4a-58d1da77df9d
+### Result 1: Single, isolated lateral push (validated)
 
+Randomized trials (`n=60` per condition, force and timing jitter, 3 repeats), comparing the nominal controller against the event-triggered RL-gated controller:
 
+| Push force | Nominal success | Nominal peak roll | RL-gated success | RL-gated peak roll |
+|---|---|---|---|---|
+| 140 N | 96.7% | 6.62° | **100.0%** | **5.17°** |
+| 150 N | 90.0% | 9.97° | **96.7%** | **7.46°** |
+| 160 N | 85.0% | 12.95° | 86.7% | 13.50° (comparable; excluded from claim) |
 
+At 140-150 N, RL improves recovery success by 3 to 7 percentage points and reduces peak roll by roughly 22 to 25%, with zero regression to nominal walking at 0 N and under 1.5% added compute overhead versus the MPC's own QP solve time. The claim is deliberately scoped to 140-150 N, the range where the improvement is consistent and repeatable.
 
+### Result 2: Extending to multiple pushes in one episode
 
-### Motivation
+The single-push policy was trained and validated on episodes containing exactly one disturbance. Extending it to a sequence of several pushes required diagnosing and resolving three compounding effects that only become visible under repeated disturbances:
 
-Pure PPO with a hand-designed reward (upright, height, forward velocity, torque penalty) was tried first and repeatedly produced reward-hacked, non-gait behaviors (e.g. sliding along the ground) rather than a clean trot -- a well-known failure mode of reward engineering without a motion reference. The approach was switched to **imitation learning**: using trajectories recorded from the working MPC+WBC controller above as a reference signal for RL, rather than hand-crafting the gait from reward terms alone.
+**Gate re-triggering.** The activation gate needed a minimum cooldown after closing to prevent it from immediately re-opening on residual, decaying correction signal. Adding this cooldown resolved self-sustained recovery loops and cleanly handled well-spaced pushes.
 
-### Method (current architecture)
+**Lateral displacement accumulation.** Diagnosis showed the recovery logic was correcting roll and velocity back to normal after each push, but never correcting the *net lateral position* a push displaced the robot to. These displacements compounded across repeated pushes, leaving the MPC operating from a laterally-shifted baseline the policy had never seen during training. The fix introduces a `RETURN_CENTER` mode: once the fast RL recovery settles, a slow, separate outer loop drives lateral position back toward the nominal line before the system is considered fully recovered.
 
-**Reference data.** The MPC+WBC controller is run and logged at 200 Hz (forward trot, in-place trot), recording joint angles, joint velocities, base pose/orientation, and per-foot contact mask -- 2000 frames per gait.
+**Yaw/frame coupling.** A residual, non-decaying position error remained even with the above fix. A targeted sweep (fixed lateral-velocity commands, no push) isolated the mechanism: the underlying MPC/WBC stack has a real, nonlinear coupling between commanded lateral velocity and yaw rate. Because the outer return loop computed its correction in the body frame, accumulated yaw was silently rotating the intended world-frame correction away from its target. The fix computes the desired velocity in world-frame terms and rotates it into the body frame at each step, making the return controller yaw-invariant, and extends the outer loop into a slow heading-restoration term (`RETURN_NOMINAL`) that runs after the fast RL recovery completes.
 
-**Deterministic reference clock + Reference State Initialization (RSI).** The imitation mechanism went through several iterations (see below) before converging on a standard DeepMimic-style design:
-- Each episode starts with the robot's **full physical state** (base position/orientation/velocity, joint angles/velocities) set directly from a random point in the recorded gait cycle, rather than always starting from a fixed standing pose.
-- The reference index driving imitation targets, foot-clearance targets, and the phase observation feature advances **deterministically** -- a fixed 4 frames per control step (200 Hz reference / 50 Hz control), with **no state-dependent correction**. This was a deliberate move away from an earlier adaptive nearest-neighbor matching scheme (see Debugging Journey) that turned out to create multiple feedback-loop bugs.
+The final architecture is a three-state supervisor, with disturbance detection made reference-aware (comparing against the outer loop's own commanded velocity/heading rather than raw zero) so the slow, intentional return motion cannot itself trigger a false disturbance:
 
-**Reward function**, per control step:
-- Imitation terms rewarding joint-angle and joint-velocity match against the reference at the current deterministic index.
-- An upright/height/torque/smoothness/lateral-velocity term set, plus a forward-velocity term capped at the reference's own recorded speed.
-- A **foot-clearance term** rewarding swing height up to the *real instantaneous reference foot height* at that exact point in the swing (precomputed via forward kinematics over the whole reference trajectory), with a one-sided penalty (plus a small tolerance band) for exceeding it -- this specifically closed an exploit where a flat, saturating height cap let a leg overshoot its natural swing height with no cost.
-- A **phase-conditioned contact-synchrony term** rewarding the real foot-contact pattern for matching the reference's own recorded pattern at the current deterministic index (not just "any valid trot pattern"), tightening true phase-locking between diagonal leg pairs.
-- A direct, non-circular penalty for any single foot remaining in the same contact state (on/off the ground) for longer than the reference's own typical duration, preventing degenerate "one leg permanently planted / one leg permanently airborne" solutions.
+```
+NOMINAL -> (disturbance detected) -> RL_RECOVERY -> (settled) -> RETURN_NOMINAL -> (position + heading restored) -> NOMINAL
+```
 
-**BC pretraining.** Reference (observation, action) pairs are reconstructed directly from the recorded trajectories, and the PPO policy's network is pretrained via supervised regression against them before any RL -- necessary because RL-from-scratch under the imitation reward alone converged slowly and inconsistently. PPO fine-tuning then corrects for closed-loop drift that pure BC cannot address on its own.
+### Result 3: Multi-push, randomized validation
 
-### Debugging journey
+**Wide spacing (15 s between pushes), n=10 randomized trials, 4 alternating pushes per episode:**
 
-Getting to a clean, reliable gait took a long sequence of hypothesis -> diagnose -> fix -> re-test cycles, several of which turned up genuine bugs rather than just needing more training:
+| | Survival rate | Mean peak roll |
+|---|---|---|
+| Nominal | 100.0% | 31.27° ± 23.70° |
+| RL (3-state supervisor) | 100.0% | **20.54° ± 18.06°** |
 
-- **Silent observation/reward bug**: foot contact body names were misspelled in the code (`_foot_joint` vs. the model's actual `_foot`), silently zeroing out real contact information and a reward term for a long stretch of early training.
-- **Open-loop phase drift**: the original imitation mechanism used a gait-phase clock disconnected from the robot's real state, which drifted out of sync within an episode -- replaced with adaptive nearest-neighbor state matching, which fixed that but introduced new problems (a policy could satisfy contact-pattern matching while cycling its gait 4-7x faster than the reference's real cadence; a "permanently airborne leg / permanently planted leg" exploit made possible by a clearance reward that never actually penalized abandoning the gait cycle).
-- **Diagonal leg-pair asymmetry**: one diagonal pair reliably converged to a clean trot while the other never did, across many training runs. Ruled out physical/model asymmetry directly via MJCF inspection (masses, inertias, joint ranges confirmed symmetric). Traced (with outside review) to *spontaneous symmetry breaking*, reinforced by the adaptive matcher's dependence on the robot's own realized contacts -- a subtle feedback loop, not a physical bug. Tried mirror-augmented BC pretraining (verifying the correct joint-mirroring convention numerically via forward kinematics rather than assuming it); this measurably fixed the specific symmetry metric but was later found, via a proper 30-rollout comparison, to have regressed overall stability -- a real, informative negative result, not just a wrong guess.
-- **Structural rewrite**: given the adaptive matcher was the common thread behind several of the above issues, it was replaced entirely with the deterministic clock + RSI design described above. This resolved the diagonal asymmetry structurally and produced genuine forward locomotion (rather than a policy that survived by barely moving), though initial results were visually inconsistent ("dancing").
-- **Contaminated evaluation environment**: the base scene file turned out to have a permanent staircase geometry baked in, unrelated to and bypassing the terrain-curriculum system, at a location the robot would walk into partway through a rollout. Found by directly inspecting the model's geometry, confirmed to be a real confound (evaluating already-trained weights on a corrected scene improved measured performance substantially with zero retraining), and fixed by generating a clean flat-only scene file.
-- **Rear-leg overshoot -> yaw drift**: diagnostics showed rear legs swinging ~49-84% higher than front legs (the real reference gait itself has a natural, smaller ~22% asymmetry) and that this excess correlated strongly with real, accumulating yaw drift (not benign gait-cycle oscillation, confirmed by comparing net drift against local oscillation range). Root cause: the clearance reward saturated at a fixed height cap with no penalty for exceeding it. Fixed in two iterations -- an initial fix using a flat per-leg-group target overcorrected and made things worse (a flat target across the whole swing punishes the normal low-height portions of a real swing near liftoff/touchdown), refined into a fix using the *actual instantaneous reference foot height* as a one-sided target. This resolved the overshoot, the yaw drift, *and* general gait quality simultaneously.
-- **Phase-conditioned contact reward**: with the above fixed, tightened diagonal-pair synchronization further by replacing a phase-invariant sync reward (which accepted either diagonal contact pattern regardless of what the reference actually called for at that instant) with one matching the reference's real pattern at the current index.
-- **Statistically validated final check**: an initial small sample suggested a possible residual systematic yaw bias from foot-touchdown events. A properly powered follow-up (25 rollouts, event-level analysis, rollout-level bootstrapped confidence intervals, and a correlation test between cumulative touchdown impulse and actual net drift) showed the per-touchdown impulses are a normal, self-canceling feature of diagonal-pair trotting (opposite sign between diagonals, near-zero pooled mean, weak correlation with real drift) -- not a real defect, avoiding an unnecessary reward change that would likely have suppressed natural gait dynamics for no real benefit.
+Both controllers survive every trial at this spacing; RL still delivers a real, roughly 34% reduction in average peak roll.
 
-### Results (current, validated)
+**Tight spacing (6 s between pushes), n=10 randomized trials, 4 alternating pushes per episode:**
 
-Evaluated over 30 rollouts (500 steps / 10 seconds each) on a genuinely flat scene:
+| | Survival rate | Mean peak roll |
+|---|---|---|
+| Nominal | 90.0% | 31.12° ± 28.63° |
+| RL (3-state supervisor) | **100.0%** | **20.28° ± 19.00°** |
 
-| Metric | Result |
-|---|---|
-| Survival (no fall) | **100%** (30/30) |
-| Forward speed | **0.71-0.74 m/s** |
-| Diagonal-pair contact sync (both pairs) | **70-96%** |
-| Front/rear swing-height ratio | ~12% (reference's own natural value: ~22%) |
-| Net yaw drift | Small residual in a minority of rollouts; confirmed statistically to not stem from a systematic touchdown-impulse bias |
+At tight spacing, nominal fails one of the ten randomized trials outright. The RL supervisor survives that identical trial cleanly and matches or beats nominal on every metric. This is the strongest form of the result: RL prevents a fall the baseline controller cannot recover from on its own, validated with matched random seeds across repeated trials rather than a single run.
 
-Visual inspection confirms a clean, confident trot with no falls, hesitation, or "dancing" across repeated rollouts.
+### Demo: same trial, nominal vs RL
 
-### Current status and next steps
+Both videos below are the exact same randomized 4-push trial (matched seed, identical push timing and force), the specific trial from the tight-spacing table above where nominal fails and RL survives.
 
-This result is for **flat ground only** -- multi-terrain locomotion (slopes, steps) was deliberately set aside partway through this process to focus on getting the core flat-ground gait fully reliable first, since early terrain attempts were built on top of a flat-ground policy that wasn't yet solid (and, as discovered later, an evaluation scene that wasn't even genuinely flat). With a validated, stable flat-ground result now in hand, the natural next step is to **resume the terrain curriculum** (`Go2TerrainEnv` already supports ramping slope/step difficulty as a function of training progress) on top of this policy, and re-run the same rigorous diagnostic process -- fall rate, gait symmetry, drift analysis -- specifically for slope and step terrain.
+**Nominal controller only.** Falls after the second push and does not recover. Video continues 2 seconds past the fall to show the robot down.
 
-### File Structure (RL additions)
+https://github.com/user-attachments/assets/4427e7fd-b1bc-428d-9945-9943124ed48a
+
+**RL, 3-state supervisor.** Same trial, same pushes. Recovers cleanly from all 4 pushes and completes the full run.
+
+https://github.com/user-attachments/assets/6269784b-a362-4e3b-b8d1-45d89a31a97a
+
+### Scope
+
+The single-push result is scoped to 140-150 N lateral pushes, the range where the improvement is consistent. A parallel investigation into recovery from arbitrary push directions (not just lateral) produced a useful mechanistic finding, that recovery quality depends on the interaction between push direction and gait support-phase, and was set aside as a distinct follow-on problem once the lateral case was fully validated and extended to the multi-push setting above.
+
+### File Structure (RL push-recovery)
 
 ```
 go2-convex-mpc/
-├── examples/
-│   ├── go2_terrain_env.py             # Gymnasium env: reward, RSI, deterministic clock, observation
-│   ├── train_ppo.py                   # PPO training/resume entrypoint (SB3), LR/entropy/gamma schedules
-│   ├── bc_pretrain.py                 # Behavior-cloning pretraining on MPC reference data (+ mirror augmentation)
-│   ├── collect_mpc_reference.py       # Records MPC+WBC trajectories for imitation reward
-│   ├── make_clean_flat_scene.py       # Strips unintended terrain geometry from the base scene file
-│   └── data/
-│       └── mpc_reference.npz          # Recorded reference trajectories (q, dq, base pose, contact mask, phase)
-└── models/MJCF/go2/
-    └── scene_flat_clean.xml           # Genuinely flat scene used for all current training/evaluation
+└── rl_push_recovery/
+    ├── README.md                       # setup, dependency notes, per-file description
+    ├── convex_mpc_modified/            # 3 files this code depends on that differ from base repo
+    │   ├── com_trajectory.py           # adds roll_ref_deg parameter [MODIFIED]
+    │   ├── gait.py                     # per-instance phase_offset [MODIFIED]
+    │   └── inplace_terrain_v3.py       # flat-ground scene helper [NEW]
+    ├── mpc_push_recovery_env.py        # single-push gym environment
+    ├── mpc_push_recovery_v1_final.zip  # trained PPO policy
+    ├── final_1d_characterization.py    # generalization / latency / speed checks
+    ├── push_recovery_multi_state.py    # three-state supervisor, reproduces both 4-push tables
+    └── ...                             # video recording/rendering scripts
 ```
+
+See `rl_push_recovery/README.md` for setup and per-file details.
 
 ### Installation
 
