@@ -290,7 +290,7 @@ Both videos below are the exact same randomized 4-push trial (matched seed, iden
 
 **Nominal controller only.** Falls after the second push and does not recover. Video continues 2 seconds past the fall to show the robot down.
 
-https://github.com/user-attachments/assets/4427e7fd-b1bc-428d-9945-9943124ed48a
+https://github.com/user-attachments/assets/9bd55a1d-7e12-47cf-959d-b17602b63c84
 
 **RL, 3-state supervisor.** Same trial, same pushes. Recovers cleanly from all 4 pushes and completes the full run.
 
